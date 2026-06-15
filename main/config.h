@@ -23,5 +23,5 @@
 // serial (see main.cpp), `s` to persist; or bake your final value in here.
 // +ms = emit earlier (compensates output latency); ms is tempo-independent.
 // +ticks = whole 1/24-beat steps (tempo-dependent). Both may be negative.
-#define DEFAULT_OFFSET_MS     0
+#define DEFAULT_OFFSET_MS     75   // tuned by ear against a real SMS
 #define DEFAULT_OFFSET_TICKS  0

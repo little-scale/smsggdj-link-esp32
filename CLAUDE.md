@@ -10,7 +10,10 @@ timeline, and drives a **2-bit tick counter** onto two GPIOs into a Sega Master
 System controller port, so the **SMSGGDJ** tracker (`~/Documents/sms_tracker`,
 its `SYNC: IN` mode) follows Ableton Live's tempo and transport.
 
-Status: **new, no code yet.** This file is the spec + decisions; build it out.
+Status: **working on hardware.** The ESP-IDF firmware in `main/` joins Link,
+follows tempo/transport, launches on the next bar after start, and drives a real
+SMS via `SYNC: IN` in time (latency tuned out with a +75 ms offset). This file is
+the spec + decisions + integration notes.
 
 Sibling reference project: `~/Documents/gba-link-sync` (same idea for a GBA).
 
@@ -78,9 +81,20 @@ Ported from the ares emulator fork (see References):
 - **User offsets** (signed ms + signed ticks) for by-ear latency alignment:
   `+ms` samples Link time later → ticks emitted earlier. Live-tunable over the
   USB serial console (`serial_task`/`handle_command`), persisted in NVS
-  (namespace `bridge`), with compiled fallbacks `DEFAULT_OFFSET_*` in config.h.
-  Changing an offset stays monotonic for free — the presenter only ever steps
-  the wire forward, so lowering an offset just freezes until time catches up.
+  (namespace `bridge`), with compiled fallbacks `DEFAULT_OFFSET_*` in config.h
+  (currently +75 ms, tuned by ear against a real SMS). Changing an offset stays
+  monotonic for free — the presenter only ever steps the wire forward, so
+  lowering an offset just freezes until time catches up.
+
+## Gotchas (learned the hard way)
+
+- **Ableton "Start Stop Sync"** is a separate toggle from "Link". If it's off,
+  `isPlaying()` is always false → the bridge sees `playing=0` and never launches.
+- Opening the USB-Serial/JTAG port pulses DTR/RTS and **resets the C3**. Use one
+  persistent `idf.py monitor` session for live tuning; one-shot opens reboot the
+  board (which then reloads the NVS/compiled default).
+- Console output needs `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y` — the XIAO's only
+  USB is the USB-Serial/JTAG peripheral, not a UART bridge.
 
 ## Toolchain (decided: ESP-IDF)
 

@@ -44,14 +44,19 @@ idf.py -p /dev/cu.usbmodem* flash monitor   # replace with your port
 
 ## Status
 
-Running on a XIAO ESP32-C3: it joins a Link session over WiFi, follows tempo and
-transport, and advances the 24-PPQN tick target at the correct rate (verified at
-135 BPM = 54 ticks/s). Implemented: open-drain GPIO output, the monotonic
-≤3-ticks/SMS-frame presenter on a hardware `gptimer` ISR, WiFi station join, and
-bar-aligned launch (`main/main.cpp`).
+**Working on hardware.** A XIAO ESP32-C3 joins a Link session over WiFi, follows
+Live's tempo and transport, launches on beat 1 of the next bar after start, and
+drives a real SMS via `SYNC: IN` in time. Tick rate verified exact (135 BPM = 54
+ticks/s) and output latency tuned out with a +75 ms alignment offset (the default
+in `main/config.h`).
 
-Confirmed driving a real SMS via `SYNC: IN` (in time; tune residual latency
-below). Remaining: more alignment testing across tempos.
+Implemented: open-drain GPIO output, the monotonic ≤3-ticks/SMS-frame presenter
+on a hardware `gptimer` ISR, WiFi station join, bar-aligned launch, and live
+serial offset tuning persisted in NVS (`main/main.cpp`).
+
+> Note: Ableton's **Start Stop Sync** must be enabled (separate from the Link
+> toggle) for the bridge to follow transport — otherwise it sees `playing=0` and
+> holds.
 
 ## Tuning latency
 
