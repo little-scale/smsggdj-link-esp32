@@ -1,0 +1,18 @@
+# Arduino / arduino-cli build output
+/build/
+*.bin
+*.elf
+*.map
+*.hex
+
+# Secrets (WiFi creds, etc.) — keep out of history
+secrets.h
+*.local
+
+# macOS
+.DS_Store
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
