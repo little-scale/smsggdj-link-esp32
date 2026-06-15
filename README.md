@@ -44,11 +44,14 @@ idf.py -p /dev/cu.usbmodem* flash monitor   # replace with your port
 
 ## Status
 
-Builds and links clean for the ESP32-C3. Implemented: open-drain GPIO output,
-the monotonic ≤3-ticks/SMS-frame presenter on a hardware `gptimer` ISR, WiFi
-station join, and real Ableton Link tempo/transport tracking with bar-aligned
-launch (`main/main.cpp`). Not yet done: by-ear user offsets + persistence, and
-on-hardware verification against a console.
+Running on a XIAO ESP32-C3: it joins a Link session over WiFi, follows tempo and
+transport, and advances the 24-PPQN tick target at the correct rate (verified at
+135 BPM = 54 ticks/s). Implemented: open-drain GPIO output, the monotonic
+≤3-ticks/SMS-frame presenter on a hardware `gptimer` ISR, WiFi station join, and
+bar-aligned launch (`main/main.cpp`).
+
+Not yet verified: the electrical output into a real SMS (scope on TR/TH + the
+tracker following in `SYNC: IN`). Not yet done: by-ear user offsets + persistence.
 
 See [`CLAUDE.md`](CLAUDE.md) for the full wire contract, hardware decisions, and
 architecture, and [`WIRING.md`](WIRING.md) for the pinout.

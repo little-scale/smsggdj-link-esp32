@@ -11,3 +11,7 @@ CONFIG_FREERTOS_HZ=1000
 
 # app_main runs the Link object + target loop; give it headroom.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# The XIAO ESP32-C3's only USB is the USB-Serial/JTAG peripheral; route the
+# console there so logs appear over /dev/cu.usbmodem* (default is UART0).
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
