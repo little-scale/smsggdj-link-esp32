@@ -48,10 +48,11 @@ Rules:
   **WROOM-32** is the proven-safe fallback (isolate Link's networking from the
   tick timer). WiFi is mandatory (Link = LAN UDP multicast).
 - **Pin map (chosen):** TR/bit0 = **D1 (GPIO3)**, TH/bit1 = **D2 (GPIO4)**,
-  shared ground = the XIAO **GND** pad. D1/D2 are adjacent, non-strapping GPIOs
-  with GND right beside them. **Avoid** the C3 strapping pins for these outputs:
-  D0/GPIO2, D8/GPIO8, D9/GPIO9 (GPIO9 = boot-mode) — driving them at boot can
-  brick the flash sequence.
+  shared ground = the XIAO **GND** pad. D1/D2 are adjacent non-strapping GPIOs on
+  the left rail; GND is on the right rail (ground wire crosses over). **Avoid**
+  the C3 strapping pins for these outputs: D0/GPIO2, D8/GPIO8, D9/GPIO9 (GPIO9 =
+  boot-mode) — driving them at boot can brick the flash sequence. Full pin tables
+  and the DE-9 pinout are in **`WIRING.md`**.
 - **Output: open-drain** on the two signal GPIOs (`pinMode(pin,
   OUTPUT_OPEN_DRAIN)` under Arduino-ESP32). The ESP32 (3.3 V) only pulls the
   lines **low**; the SMS's internal pull-ups supply the 5 V high. No level
