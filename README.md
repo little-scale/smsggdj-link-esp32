@@ -50,8 +50,27 @@ transport, and advances the 24-PPQN tick target at the correct rate (verified at
 ≤3-ticks/SMS-frame presenter on a hardware `gptimer` ISR, WiFi station join, and
 bar-aligned launch (`main/main.cpp`).
 
-Not yet verified: the electrical output into a real SMS (scope on TR/TH + the
-tracker following in `SYNC: IN`). Not yet done: by-ear user offsets + persistence.
+Confirmed driving a real SMS via `SYNC: IN` (in time; tune residual latency
+below). Remaining: more alignment testing across tempos.
+
+## Tuning latency
+
+Output a touch late/early? Adjust the alignment offset live over the serial
+console (`idf.py -p PORT monitor`), then persist your chosen value as the
+power-on default:
+
+| cmd        | effect                                                        |
+|------------|---------------------------------------------------------------|
+| `m <ms>`   | set ms offset (signed). **+ms = emit earlier** (fixes "late") |
+| `t <ticks>`| set offset in whole 1/24-beat ticks (signed)                  |
+| `+` / `-`  | nudge ms by ±1 for fine dialing                               |
+| `z`        | zero both                                                     |
+| `s`        | save current offsets to NVS as the power-on default           |
+| `p`        | print current offsets                                         |
+
+ms is tempo-independent and finest; ticks are coarse/structural. You can also
+bake a final value into `DEFAULT_OFFSET_MS` / `DEFAULT_OFFSET_TICKS` in
+`main/config.h`.
 
 See [`CLAUDE.md`](CLAUDE.md) for the full wire contract, hardware decisions, and
 architecture, and [`WIRING.md`](WIRING.md) for the pinout.

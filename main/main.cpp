@@ -7,15 +7,20 @@
 //
 // The whole protocol is the wire contract in CLAUDE.md; pinout in WIRING.md.
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 
 #include "config.h"
 #include "secrets.h"  // copy secrets.h.example -> secrets.h
 
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -23,6 +28,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 #include <ableton/Link.hpp>
@@ -110,6 +116,14 @@ static ableton::Link* g_link = nullptr;
 static double g_launchBeat = 0;
 static std::chrono::microseconds g_lastStart{-1};
 
+// By-ear alignment offsets, live-tunable over serial, persisted in NVS.
+// +ms shifts the sampled Link time later -> ticks emitted earlier (compensates
+// output latency); tempo-independent. +ticks adds whole 1/24-beat steps. Both
+// signed. 32-bit atomics are lock-free on the C3, and these are read only from
+// the loop task (not the ISR), so plain atomics are fine.
+static std::atomic<int> g_offsetMs{DEFAULT_OFFSET_MS};
+static std::atomic<int> g_offsetTicks{DEFAULT_OFFSET_TICKS};
+
 static long long computeTarget() {
   auto state = g_link->captureAppSessionState();
   if (!state.isPlaying()) {
@@ -127,10 +141,11 @@ static long long computeTarget() {
     g_launchBeat = b0 - phase + (phase > 1e-9 ? LINK_QUANTUM : 0.0);
   }
 
-  const auto now = g_link->clock().micros();
+  const auto now = g_link->clock().micros()
+                   + std::chrono::microseconds((int64_t)g_offsetMs.load() * 1000);
   const double beats = state.beatAtTime(now, LINK_QUANTUM) - g_launchBeat;
   if (beats < 0.0) return -1;  // armed, before the bar line
-  long long t = (long long)std::floor(beats * PPQN);
+  long long t = (long long)std::floor(beats * PPQN) + g_offsetTicks.load();
   return t < 0 ? 0 : t;
 }
 
@@ -179,6 +194,88 @@ static void wifi_connect() {
 }
 
 // ---------------------------------------------------------------------------
+// Offset persistence (NVS) + live tuning over the USB serial console.
+// ---------------------------------------------------------------------------
+static const char* NVS_NS = "bridge";
+
+static void offsets_load() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+  int32_t v;
+  if (nvs_get_i32(h, "ms", &v) == ESP_OK) g_offsetMs = v;
+  if (nvs_get_i32(h, "ticks", &v) == ESP_OK) g_offsetTicks = v;
+  nvs_close(h);
+}
+
+static void offsets_save() {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+    printf(">> save FAILED (nvs_open)\n");
+    return;
+  }
+  nvs_set_i32(h, "ms", g_offsetMs.load());
+  nvs_set_i32(h, "ticks", g_offsetTicks.load());
+  const esp_err_t e = nvs_commit(h);
+  nvs_close(h);
+  printf(">> %s offset = %d ms, %d ticks\n",
+         e == ESP_OK ? "SAVED" : "save FAILED", g_offsetMs.load(), g_offsetTicks.load());
+}
+
+static void offsets_print() {
+  printf(">> offset = %d ms, %d ticks\n", g_offsetMs.load(), g_offsetTicks.load());
+}
+
+static void offsets_help() {
+  printf("cmds: m <ms> (set) | t <ticks> (set) | + / - (nudge ms +-1) | "
+         "z (zero) | s (save default) | p (print)\n");
+}
+
+static void handle_command(char* s) {
+  while (*s == ' ' || *s == '\t') s++;
+  const char c = *s;
+  switch (c) {
+    case '\0': offsets_print(); break;
+    case 'm': g_offsetMs = (int)strtol(s + 1, nullptr, 10); offsets_print(); break;
+    case 't': g_offsetTicks = (int)strtol(s + 1, nullptr, 10); offsets_print(); break;
+    case '+': g_offsetMs += (s[1] ? (int)strtol(s, nullptr, 10) : 1); offsets_print(); break;
+    case '-': g_offsetMs += (s[1] ? (int)strtol(s, nullptr, 10) : -1); offsets_print(); break;
+    case 'z': g_offsetMs = 0; g_offsetTicks = 0; offsets_print(); break;
+    case 's': offsets_save(); break;
+    case 'p': offsets_print(); break;
+    default: offsets_help(); break;
+  }
+}
+
+static void serial_task(void*) {
+  // Console input over the USB-Serial/JTAG peripheral.
+  usb_serial_jtag_driver_config_t cfg = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+  usb_serial_jtag_driver_install(&cfg);
+  usb_serial_jtag_vfs_use_driver();
+  usb_serial_jtag_vfs_set_rx_line_endings(ESP_LINE_ENDINGS_CR);
+  usb_serial_jtag_vfs_set_tx_line_endings(ESP_LINE_ENDINGS_CRLF);
+
+  offsets_help();
+  char line[48];
+  size_t len = 0;
+  while (true) {
+    const int ch = fgetc(stdin);
+    if (ch == EOF) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+    putchar(ch);  // echo (the IDF monitor doesn't echo locally)
+    fflush(stdout);
+    if (ch == '\n' || ch == '\r') {
+      line[len] = '\0';
+      handle_command(line);
+      len = 0;
+    } else if (len < sizeof(line) - 1) {
+      line[len++] = (char)ch;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 static void gpio_setup() {
   gpio_config_t io = {};
   io.pin_bit_mask = (1ULL << PIN_TR) | (1ULL << PIN_TH);
@@ -213,6 +310,8 @@ static void presenter_timer_start() {
 
 extern "C" void app_main() {
   ESP_ERROR_CHECK(nvs_flash_init());
+  offsets_load();  // override compiled defaults with any saved value
+  xTaskCreate(serial_task, "serial", 4096, nullptr, 5, nullptr);
   wifi_connect();
   gpio_setup();
 
@@ -235,8 +334,9 @@ extern "C" void app_main() {
     if (now - lastHud > 1000000) {
       lastHud = now;
       auto s = link.captureAppSessionState();
-      ESP_LOGI(TAG, "peers=%u tempo=%.1f playing=%d target=%lld",
-               (unsigned)link.numPeers(), s.tempo(), (int)s.isPlaying(), t);
+      ESP_LOGI(TAG, "peers=%u tempo=%.1f playing=%d target=%lld off=%dms/%dt",
+               (unsigned)link.numPeers(), s.tempo(), (int)s.isPlaying(), t,
+               g_offsetMs.load(), g_offsetTicks.load());
     }
     vTaskDelay(1);  // ~1 ms
   }

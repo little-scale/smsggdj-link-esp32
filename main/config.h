@@ -17,3 +17,11 @@
 
 // --- Presenter timer ---
 #define PRESENTER_HZ    1000   // how often the timer advances the counter / writes pins
+
+// --- Alignment offsets (by-ear latency compensation) ---
+// Fallback defaults used only when nothing is stored in NVS. Tune live over
+// serial (see main.cpp), `s` to persist; or bake your final value in here.
+// +ms = emit earlier (compensates output latency); ms is tempo-independent.
+// +ticks = whole 1/24-beat steps (tempo-dependent). Both may be negative.
+#define DEFAULT_OFFSET_MS     0
+#define DEFAULT_OFFSET_TICKS  0

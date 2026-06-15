@@ -75,7 +75,12 @@ Ported from the ares emulator fork (see References):
   bar line; negative = armed (pre-bar) and freezes the counter.
 - The 64-bit `target` is shared loop→ISR via a `portMUX` spinlock (a 64-bit
   `std::atomic` is not lock-free / ISR-safe on the single-core rv32imc C3).
-- **Not yet ported:** user offsets (ms latency + ticks phase) and persistence.
+- **User offsets** (signed ms + signed ticks) for by-ear latency alignment:
+  `+ms` samples Link time later → ticks emitted earlier. Live-tunable over the
+  USB serial console (`serial_task`/`handle_command`), persisted in NVS
+  (namespace `bridge`), with compiled fallbacks `DEFAULT_OFFSET_*` in config.h.
+  Changing an offset stays monotonic for free — the presenter only ever steps
+  the wire forward, so lowering an offset just freezes until time catches up.
 
 ## Toolchain (decided: ESP-IDF)
 

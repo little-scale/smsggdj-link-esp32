@@ -1,7 +1,7 @@
 idf_component_register(
   SRCS "main.cpp"
   INCLUDE_DIRS "."
-  REQUIRES driver esp_wifi nvs_flash esp_netif esp_event esp_timer
+  REQUIRES driver esp_driver_usb_serial_jtag esp_wifi nvs_flash esp_netif esp_event esp_timer
 )
 
 # Ableton Link (header-only C++) lives in the lib/link git submodule.
