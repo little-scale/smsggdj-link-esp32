@@ -27,27 +27,28 @@ Full pinout and the DE-9 wiring are in [`WIRING.md`](WIRING.md).
 
 ## Build & flash
 
-Arduino-ESP32 via `arduino-cli`:
+[ESP-IDF](https://docs.espressif.com/projects/esp-idf/) v5.5. Ableton Link's
+networking depends on the `espressif/asio` managed component, which the IDF
+component manager fetches automatically — vanilla asio will not compile for
+ESP32, so this is an IDF project, not Arduino.
 
 ```sh
-# one-time
-arduino-cli core install esp32:esp32
+. ~/esp/esp-idf/export.sh                  # per shell (after installing IDF)
+git submodule update --init lib/link       # Ableton Link (header-only)
+cp main/secrets.h.example main/secrets.h   # then edit WiFi creds
 
-# WiFi credentials (git-ignored)
-cp secrets.h.example secrets.h   # then edit secrets.h
-
-# compile + upload (replace PORT, e.g. /dev/cu.usbmodem*)
-arduino-cli compile --fqbn esp32:esp32:XIAO_ESP32C3 .
-arduino-cli upload  --fqbn esp32:esp32:XIAO_ESP32C3 -p PORT .
-arduino-cli monitor -p PORT -c baudrate=115200
+idf.py set-target esp32c3                   # once
+idf.py build
+idf.py -p /dev/cu.usbmodem* flash monitor   # replace with your port
 ```
 
 ## Status
 
-Scaffold. The open-drain GPIO output, hardware-timer presenter (monotonic,
-≤3 ticks/SMS-frame), and WiFi join are in place. **The Ableton Link integration
-is stubbed** — see `link_update_target()` in the sketch and `CLAUDE.md` for the
-port plan. Until it's wired in, the counter stays frozen.
+Builds and links clean for the ESP32-C3. Implemented: open-drain GPIO output,
+the monotonic ≤3-ticks/SMS-frame presenter on a hardware `gptimer` ISR, WiFi
+station join, and real Ableton Link tempo/transport tracking with bar-aligned
+launch (`main/main.cpp`). Not yet done: by-ear user offsets + persistence, and
+on-hardware verification against a console.
 
 See [`CLAUDE.md`](CLAUDE.md) for the full wire contract, hardware decisions, and
-architecture.
+architecture, and [`WIRING.md`](WIRING.md) for the pinout.

@@ -1,9 +1,15 @@
-# Arduino / arduino-cli build output
+# ESP-IDF build output
 /build/
 *.bin
 *.elf
 *.map
 *.hex
+
+# ESP-IDF generated config + fetched managed components (deps pinned in
+# dependencies.lock, which IS committed for reproducibility).
+/sdkconfig
+/sdkconfig.old
+/managed_components/
 
 # Secrets (WiFi creds, etc.) — keep out of history
 secrets.h
@@ -16,3 +22,5 @@ secrets.h
 .vscode/
 .idea/
 *.swp
+.cache/
+compile_commands.json

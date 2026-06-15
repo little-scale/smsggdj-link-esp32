@@ -1,0 +1,13 @@
+# Defaults applied on a fresh build (committed; sdkconfig itself is git-ignored).
+
+# Ableton Link requires C++ exceptions.
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+
+# Link + asio + WiFi need a large app partition (no OTA).
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# 1 kHz tick for the presenter timing / FreeRTOS.
+CONFIG_FREERTOS_HZ=1000
+
+# app_main runs the Link object + target loop; give it headroom.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

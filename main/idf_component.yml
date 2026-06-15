@@ -1,0 +1,6 @@
+## Managed dependencies (fetched by the IDF component manager on build).
+dependencies:
+  # Espressif's ESP32-patched asio (lwip shims). Link's networking rides on it.
+  espressif/asio: "*"
+  idf:
+    version: ">=5.0"

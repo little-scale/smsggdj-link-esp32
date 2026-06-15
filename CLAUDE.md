@@ -53,26 +53,61 @@ Rules:
   the C3 strapping pins for these outputs: D0/GPIO2, D8/GPIO8, D9/GPIO9 (GPIO9 =
   boot-mode) — driving them at boot can brick the flash sequence. Full pin tables
   and the DE-9 pinout are in **`WIRING.md`**.
-- **Output: open-drain** on the two signal GPIOs (`pinMode(pin,
-  OUTPUT_OPEN_DRAIN)` under Arduino-ESP32). The ESP32 (3.3 V) only pulls the
-  lines **low**; the SMS's internal pull-ups supply the 5 V high. No level
-  shifter needed.
+- **Output: open-drain** on the two signal GPIOs (`GPIO_MODE_OUTPUT_OD`;
+  `gpio_set_level` 1 = release/high-Z, 0 = drive low). The ESP32 (3.3 V) only
+  pulls the lines **low**; the SMS's internal pull-ups supply the 5 V high. No
+  level shifter needed.
 - **Power: USB (own supply); share only GND with port 2.** Do **not** tap the
   port's +5 V (pin 5) — WiFi current peaks risk sagging the console's 5 V rail.
 - Tick edges should come from a **hardware timer ISR** (toggling the two GPIOs),
   independent of the WiFi/main loop.
 
-## Architecture (planned)
+## Architecture (implemented in `main/main.cpp`)
 
-Port the proven logic from the ares emulator fork (see References):
+Ported from the ares emulator fork (see References):
 - Join Link (`ableton::Link`), `enableStartStopSync(true)`, `enable(true)`.
-- Per scheduling instant, `target = floor(beatsSinceLaunch × 24) (+ offsets)`.
-- A **monotonic presenter**: advance `presented` toward `target`, never
-  backward, ≤ 3 per step; output `presented & 3` on TR/TH.
+- Per scheduling instant, `target = floor(beatsSinceLaunch × 24)` (see
+  `computeTarget()`). No frame-PLL — that was emulator-only (vsync pacing).
+- A **monotonic presenter** in the `gptimer` ISR (`onPresenterTimer`): advance
+  `presented` toward `target`, never backward, ≤ 3 per SMS frame; output
+  `presented & 3` on TR/TH (open-drain `gpio_set_level`).
 - `beatsSinceLaunch` uses the captured session state + `phaseAtTime` to find the
-  bar line; negative = armed (pre-bar).
-- Optional **user offsets** (ms latency + ticks phase), persisted; increases
-  feed in ≤3/step, decreases freeze until time catches up (keeps it monotonic).
+  bar line; negative = armed (pre-bar) and freezes the counter.
+- The 64-bit `target` is shared loop→ISR via a `portMUX` spinlock (a 64-bit
+  `std::atomic` is not lock-free / ISR-safe on the single-core rv32imc C3).
+- **Not yet ported:** user offsets (ms latency + ticks phase) and persistence.
+
+## Toolchain (decided: ESP-IDF)
+
+**ESP-IDF v5.5.** Arduino-ESP32 was attempted first but dead-ends: Ableton Link's
+networking needs `espressif/asio` (an ESP32-patched asio with lwip shims),
+distributed only as an IDF managed component — vanilla asio will not compile for
+ESP32. IDF's component manager fetches it automatically. Install IDF once
+(`~/esp/esp-idf`, `install.sh esp32c3`); each shell needs `. ~/esp/esp-idf/export.sh`.
+
+Build/flash:
+
+```
+. ~/esp/esp-idf/export.sh            # per shell
+git submodule update --init lib/link # Ableton Link (header-only)
+cp main/secrets.h.example main/secrets.h   # then edit WiFi creds
+
+idf.py set-target esp32c3            # once
+idf.py build
+idf.py -p /dev/cu.usbmodem* flash monitor
+```
+
+Integration specifics worth knowing (all in `main/CMakeLists.txt` /
+`sdkconfig.defaults` / top of `main.cpp`):
+- `espressif/asio` is pulled via `main/idf_component.yml`; we use it instead of
+  Link's bundled asio (the submodule's `modules/asio-standalone` is unused —
+  that's why `lib/link` is added non-recursively).
+- `CONFIG_COMPILER_CXX_EXCEPTIONS=y` (Link needs exceptions) and
+  `CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y` (Link + asio + WiFi are large).
+- `-fexceptions` + `LINK_ESP_TASK_CORE_ID` set on the main component.
+- We define `__atomic_is_lock_free` ourselves: IDF only provides it for RISC-V
+  *with* the atomic extension, but the C3 is rv32imc (none) — Link's TripleBuffer
+  references it via an assert.
 
 ## Toolchain (decided: Arduino-ESP32)
 
