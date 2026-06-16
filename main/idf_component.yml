@@ -2,5 +2,11 @@
 dependencies:
   # Espressif's ESP32-patched asio (lwip shims). Link's networking rides on it.
   espressif/asio: "*"
+  # TinyUSB (USB-MIDI clock input). Only the ESP32-S3 has the USB-OTG peripheral
+  # this needs; the C3's USB is fixed-function USB-Serial/JTAG, so gate by target.
+  espressif/esp_tinyusb:
+    version: "^1.4"
+    rules:
+      - if: "target == esp32s3"
   idf:
     version: ">=5.0"

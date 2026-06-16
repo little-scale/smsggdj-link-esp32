@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SMSGGDJ Link Bridge — flasher</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; color: #111; }
+    h1 { font-size: 1.4rem; }
+    code { background: #f2f2f2; padding: .1rem .3rem; border-radius: .25rem; }
+    ol { padding-left: 1.2rem; }
+    .note { color: #666; font-size: .9rem; }
+    esp-web-install-button { display: inline-block; margin: 1rem 0; }
+  </style>
+</head>
+<body>
+  <h1>Ableton Link → Sega Master System bridge</h1>
+  <p>Flash the firmware onto a <strong>Seeed XIAO ESP32-C3</strong> (Ableton Link
+     over WiFi) or <strong>XIAO ESP32-S3</strong> (Link <em>plus</em> USB-MIDI
+     clock) straight from this page — no toolchain, no command line. The flasher
+     auto-detects which board you plug in.</p>
+
+  <ol>
+    <li>Use <strong>Chrome</strong> or <strong>Edge</strong> on a desktop (Web Serial isn't in Safari/Firefox).</li>
+    <li>Plug the board in with a USB-C <strong>data</strong> cable.</li>
+    <li>Click <em>Flash</em>, pick the <code>usbmodem</code>/<code>COM</code> port, and wait.</li>
+  </ol>
+
+  <esp-web-install-button manifest="manifest.json">
+    <button slot="activate">Flash firmware</button>
+    <span slot="unsupported">Your browser can't flash — use desktop Chrome or Edge.</span>
+    <span slot="not-allowed">Serial access was denied.</span>
+  </esp-web-install-button>
+
+  <h2>After flashing: WiFi setup</h2>
+  <p>On first boot the bridge creates a WiFi network called
+     <code>SMSGGDJ-setup-XXXX</code>. Join it from a phone or laptop; a setup
+     page opens automatically (or browse to <code>http://192.168.4.1</code>).
+     Pick your network, enter the password, and the bridge reboots onto it.</p>
+  <p class="note">To change networks later, open the board's USB serial console
+     and type <code>w</code>.</p>
+
+  <h2>USB-MIDI clock (ESP32-S3 only)</h2>
+  <p>An S3 board also shows up as a standard <strong>USB-MIDI device</strong>.
+     Send it MIDI clock from your DAW (Start/Stop/Continue + clock) and the
+     bridge follows it — no WiFi needed. It auto-switches to MIDI whenever clock
+     is flowing and falls back to Link otherwise; type <code>c link</code> /
+     <code>c midi</code> / <code>c auto</code> on the serial console to force it.</p>
+
+  <p class="note">Open source (GPL v2-or-later, includes Ableton Link):
+     <a href="https://github.com/little-scale/smsggdj-link-esp32">github.com/little-scale/smsggdj-link-esp32</a></p>
+</body>
+</html>

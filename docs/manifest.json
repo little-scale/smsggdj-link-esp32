@@ -1,0 +1,19 @@
+{
+  "name": "SMSGGDJ Link Bridge",
+  "version": "157b4a3-dirty",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-C3",
+      "parts": [
+        { "path": "firmware/smsggdj-bridge-esp32c3.bin", "offset": 0 }
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/smsggdj-bridge-esp32s3.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

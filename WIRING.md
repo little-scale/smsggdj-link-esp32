@@ -1,14 +1,29 @@
-# Wiring — XIAO ESP32-C3 → SMS controller port 2
+# Wiring — XIAO ESP32 → SMS controller port 2
 
 Three wires total: two signal lines (open-drain) plus a shared ground. The board
 is **USB-powered separately** — do **not** connect the SMS +5 V (port-2 pin 5).
 
-## Connection table
+The signal lines map to different GPIO numbers (and pads) on the **C3** vs the
+**S3** — pick the table for your board. The firmware's `config.h` selects the
+right pins automatically by build target.
+
+## Connection table — XIAO ESP32-C3 (Link over WiFi)
 
 | Counter bit | XIAO pad | XIAO GPIO | → | SMS port-2 pin | SMS signal |
 |-------------|----------|-----------|---|----------------|------------|
 | bit 0       | D1       | GPIO3     | → | pin 9          | TR         |
 | bit 1       | D2       | GPIO4     | → | pin 7          | TH         |
+| (ground)    | GND      | —         | → | pin 8          | GND        |
+
+## Connection table — XIAO ESP32-S3 (Link + USB-MIDI)
+
+The S3's pad **D2 is GPIO3, which is a strapping pin**, so the S3 shifts the two
+signal lines one pad over to **D3/D4** (GPIO4/GPIO5 — adjacent, non-strapping):
+
+| Counter bit | XIAO pad | XIAO GPIO | → | SMS port-2 pin | SMS signal |
+|-------------|----------|-----------|---|----------------|------------|
+| bit 0       | D3       | GPIO4     | → | pin 9          | TR         |
+| bit 1       | D4       | GPIO5     | → | pin 7          | TH         |
 | (ground)    | GND      | —         | → | pin 8          | GND        |
 
 The bridge presents a rolling 2-bit counter `presented & 3`: TR = bit 0, TH =
@@ -59,9 +74,16 @@ on one edge).
 
 ### Why these pins
 
-D1 (GPIO3) and D2 (GPIO4) are plain, non-strapping GPIOs. **Avoid** the ESP32-C3
-strapping pins for these outputs — D0/GPIO2, D8/GPIO8, and especially D9/GPIO9
-(boot-mode select): driving them at boot can disrupt the flash/boot sequence.
+**C3:** D1 (GPIO3) and D2 (GPIO4) are plain, non-strapping GPIOs. **Avoid** the
+ESP32-C3 strapping pins for these outputs — D0/GPIO2, D8/GPIO8, and especially
+D9/GPIO9 (boot-mode select): driving them at boot can disrupt the flash/boot
+sequence.
+
+**S3:** the strapping pins to avoid are **GPIO0, GPIO3, GPIO45, GPIO46**. On the
+XIAO S3 that rules out pad D2 (= GPIO3), so the bridge uses D3 (GPIO4) and D4
+(GPIO5) — the next two adjacent, safe pads. The USB-C connector carries the
+USB-OTG peripheral (used for the USB-MIDI port + serial console); don't repurpose
+the USB data lines.
 
 ## Power & ground
 

@@ -1,9 +1,15 @@
 # ESP-IDF build output
 /build/
+/dist/
 *.bin
 *.elf
 *.map
 *.hex
+
+# Exception: the published release image IS committed so GitHub Pages can serve
+# it to the web flasher (see tools/make-release.sh, docs/firmware/).
+!docs/firmware/
+!docs/firmware/*.bin
 
 # ESP-IDF generated config + fetched managed components (deps pinned in
 # dependencies.lock, which IS committed for reproducibility).

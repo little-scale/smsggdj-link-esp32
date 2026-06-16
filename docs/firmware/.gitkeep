@@ -1,0 +1,3 @@
+# The merged release image (smsggdj-bridge-esp32c3.bin) is written here by
+# tools/make-release.sh and committed so GitHub Pages can serve it to the web
+# flasher. See ../../.gitignore for the *.bin exception that allows it.

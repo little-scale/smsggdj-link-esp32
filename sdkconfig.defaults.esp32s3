@@ -1,0 +1,14 @@
+# ESP32-S3 extras on top of sdkconfig.defaults (applied after it for this target).
+# The S3 adds the USB-MIDI clock source over its USB-OTG peripheral (TinyUSB).
+
+# TinyUSB: one MIDI interface (clock in) + one CDC interface (serial console),
+# composited onto the single USB-C connector.
+CONFIG_TINYUSB_MIDI_COUNT=1
+CONFIG_TINYUSB_CDC_ENABLED=y
+
+# On the S3 the USB-C PHY is taken over by USB-OTG (TinyUSB), so the
+# USB-Serial/JTAG console (used on the C3) is unavailable. Early-boot logs go to
+# UART0; the interactive console is brought up over USB-CDC at runtime.
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG is forced off for this target.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=n
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y

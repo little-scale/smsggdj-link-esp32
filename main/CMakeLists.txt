@@ -1,8 +1,15 @@
 idf_component_register(
   SRCS "main.cpp"
   INCLUDE_DIRS "."
-  REQUIRES driver esp_driver_usb_serial_jtag esp_wifi nvs_flash esp_netif esp_event esp_timer
+  REQUIRES driver esp_driver_usb_serial_jtag esp_wifi esp_http_server nvs_flash esp_netif esp_event esp_timer
 )
+
+# Release builds: idf.py -DSHIP=1 build  -> force the SoftAP captive portal even
+# if a developer's secrets.h is present, so compile-time creds never ship in a
+# distributed binary. Dev builds (no SHIP) keep the secrets.h fast-path.
+if(SHIP)
+  target_compile_definitions(${COMPONENT_LIB} PRIVATE BRIDGE_PROVISIONING=1)
+endif()
 
 # Ableton Link (header-only C++) lives in the lib/link git submodule.
 # Override with: idf.py -DLINK_DIR=/path/to/link build
