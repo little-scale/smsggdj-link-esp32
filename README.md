@@ -1,12 +1,14 @@
 # smsggdj-link-esp32
 
-ESP32 firmware that bridges **Ableton Link → Sega Master System**, so the
-[SMSGGDJ](https://github.com/) tracker's `SYNC: IN` mode follows Ableton Live's
-tempo and transport.
+ESP32 firmware that bridges **Ableton Link → Sega Master System & Mega Drive**, so
+the [SMSGGDJ](https://github.com/little-scale/smsggdj) tracker (SMS/Game Gear) and
+[**genmddj**](https://github.com/little-scale/genmddj) (its Mega Drive port) can
+follow Ableton Live's tempo and transport in their `SYNC: IN` mode. The Mega Drive
+path is **hardware-confirmed** — see [`WIRING.md`](WIRING.md#mega-drive--genesis--genmddj).
 
 A Seeed **XIAO ESP32-C3** joins a Link session over WiFi, derives a 24-PPQN tick
 clock from the shared beat timeline, and presents a rolling **2-bit counter** on
-two open-drain GPIOs into SMS controller **port 2**. The tracker reads the port
+two open-drain GPIOs into SMS — or Mega Drive — controller **port 2**. The tracker reads the port
 once per video frame and advances by the counter delta — so the sync is *counted,
 not edge-timed*, making it immune to WiFi/host jitter.
 

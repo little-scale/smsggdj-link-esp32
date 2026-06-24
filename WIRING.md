@@ -1,7 +1,9 @@
-# Wiring — XIAO ESP32 → SMS controller port 2
+# Wiring — XIAO ESP32 → SMS / Mega Drive controller port 2
 
 Three wires total: two signal lines (open-drain) plus a shared ground. The board
-is **USB-powered separately** — do **not** connect the SMS +5 V (port-2 pin 5).
+is **USB-powered separately** — do **not** connect the console +5 V (port-2 pin 5).
+The same three wires also clock a **Mega Drive** running genmddj — see the Mega
+Drive section below.
 
 The signal lines map to different GPIO numbers (and pads) on the **C3** vs the
 **S3** — pick the table for your board. The firmware's `config.h` selects the
@@ -53,6 +55,38 @@ This is the straight SMS↔SMS 3-wire scenario (pins 9/7/8). The tracker reads b
 are pulled up, so an idle/unplugged port reads high (counter = 3) — `SYNC IN`
 latches the line state when armed and counts only *changes*, so a clean start
 requires the bridge to be presenting a stable count before the tracker arms.
+
+## Mega Drive / Genesis — genmddj
+
+> ✅ **Confirmed working on Mega Drive hardware (2026-06-25)** — the bridge clocks
+> genmddj over controller port 2 with no MD-side changes.
+
+The **same bridge, same wiring, no firmware change** also clocks **genmddj** (the
+Mega Drive port of SMSGGDJ). The MD shares the DE-9 controller-port family, and
+genmddj's `SYNC: IN` reads the identical 2-bit counter — `$A10005` bits 5/6, i.e.
+**TR (pin 9) = bit 0, TH (pin 7) = bit 1**, at 24 PPQN. Wire it exactly as the
+tables above, into MD **controller port 2** (a normal pad in port 1 for editing).
+In genmddj: **OPTIONS → SYNC: IN**, press Start (shows `WAIT`), then start the
+Link/MIDI transport.
+
+Two MD-specific notes:
+
+- **TL (pin 6) is unused here.** The SMS reads bit 0 as `TR AND TL`; genmddj reads
+  **TR alone** (`$A10005` bit 5), so pin 6 just stays floating (as above).
+- **Check the TH (pin 7) pull-up.** ⚠ The open-drain bridge leans on the console's
+  pull-ups for the high level. An idle MD port reads `$7F` (pull-ups present), so
+  **TR (pin 9)** is fine — but **TH (pin 7)** is normally the MD's *select output*,
+  and genmddj reconfigures it as an input (`$A1000B = 0`). If its input-mode pull-up
+  is weak, counter bit 1 can read flaky — symptom: genmddj won't advance, or runs
+  erratically / double-time. Fix: a **10 kΩ pull-up on pin 7** to a logic-high rail —
+  the XIAO **3V3** pad (3.3 V is a valid MD logic high) or the console **+5 V (pin
+  5)**. A resistor pull-up draws microamps, so this does *not* break the "don't power
+  from +5 V" rule above (that rule is about the board's WiFi-peak supply current).
+  One on pin 9 won't hurt either.
+
+Counted-not-timed, so PAL/NTSC region doesn't matter — genmddj's slave locks to flat
+groove-6 (24 PPQN) to match the wire. The same 3-wire cable also cross-syncs a Mega
+Drive directly to an SMS / Game Gear — genmddj ↔ SMSGGDJ.
 
 ## XIAO ESP32-C3 pad layout (for orientation)
 
