@@ -223,6 +223,15 @@ output into an actual SMS** (same wiring story as the C3).
 > toggle) for the bridge to follow transport — otherwise it sees `playing=0` and
 > holds.
 
+### Planned: MIDI takeover
+
+Beyond clock, the same S3 and the same two wires can carry **MIDI notes** into the
+tracker — turning the console into a live multi-part MIDI sound module played from a
+DAW (channel → voice, program change → instrument, velocity → volume, note-off →
+release). It's a **console-clocked serial** layer over the existing link, designed so
+**one firmware** serves both SMSGGDJ (SMS/GG) and genmddj (Mega Drive). Concept and
+wire contract in [`MIDI.md`](MIDI.md) — designed, not built yet.
+
 ## Tuning latency
 
 Output a touch late/early? Adjust the alignment offset live over the serial
@@ -245,7 +254,9 @@ bake a final value into `DEFAULT_OFFSET_MS` / `DEFAULT_OFFSET_TICKS` in
 `main/config.h`.
 
 See [`CLAUDE.md`](CLAUDE.md) for the full wire contract, hardware decisions, and
-architecture, and [`WIRING.md`](WIRING.md) for the pinout.
+architecture, [`WIRING.md`](WIRING.md) for the pinout, and [`MIDI.md`](MIDI.md) for
+the planned MIDI-takeover concept (USB-MIDI notes → the console, one firmware for
+both trackers).
 
 ## Cut a release (maintainers)
 
