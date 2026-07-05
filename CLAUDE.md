@@ -4,17 +4,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-ESP32 firmware: an **Ableton Link → SMS hardware-sync bridge**. The board joins
-an Ableton Link session over WiFi, derives a tick clock from the shared beat
-timeline, and drives a **2-bit tick counter** onto two GPIOs into a Sega Master
-System controller port, so the **SMSGGDJ** tracker (`~/Documents/sms_tracker`,
-its `SYNC: IN` mode) follows Ableton Live's tempo and transport.
+ESP32 firmware: an **Ableton Link → SMS / Mega Drive hardware-sync bridge**. The
+board joins an Ableton Link session over WiFi, derives a tick clock from the
+shared beat timeline, and drives a **2-bit tick counter** onto two GPIOs into a
+Sega Master System controller port, so the **SMSGGDJ** tracker
+(`~/Documents/sms_tracker`, its `SYNC: IN` mode) follows Ableton Live's tempo and
+transport. The **same bridge, same wiring, no firmware change** also clocks
+**genmddj** (`~/Documents/genmddj`), the Mega Drive port of the tracker — the MD
+shares the DE-9 controller-port family and reads the identical 2-bit counter
+(`$A10005` bits 5/6). **Confirmed on Mega Drive hardware (2026-06-25).**
 
 **Two board targets, one source tree:** the **XIAO ESP32-C3** is Link-only. The
 **XIAO ESP32-S3** adds a **USB-MIDI clock** source (it has USB-OTG; the C3's USB
 is fixed-function USB-Serial/JTAG and can't do USB-MIDI). MIDI clock is 24 PPQN —
 identical to the SMS sync rate — so it feeds the exact same presenter/counter as
-Link. See "Clock sources" below.
+Link. See "Clock sources" below. The S3 also has a **MIDI takeover** mode (the
+same two wires stream live MIDI notes instead of clock — see "MIDI takeover").
 
 Status: **C3 working on hardware.** The ESP-IDF firmware in `main/` joins Link,
 follows tempo/transport, launches on the next bar after start, and drives a real
@@ -22,8 +27,10 @@ SMS via `SYNC: IN` in time (latency tuned out with a +75 ms offset). The **S3
 USB-MIDI path is verified on hardware**: composite USB (MIDI + CDC console)
 enumerates, MIDI clock drives the counter, Link/MIDI auto-arbitration works, and
 the WiFi portal opens from a ch16 pitch bend. Only the S3's **GPIO output into a
-real SMS** is still unverified (same wiring as the C3). This file is the spec +
-decisions + integration notes.
+real SMS** is still unverified (same wiring as the C3). **Mega Drive / genmddj
+counter sync is confirmed on hardware.** The S3 **MIDI-takeover** path is **coded
+but bench-pending** (see that section). This file is the spec + decisions +
+integration notes.
 
 Sibling reference project: `~/Documents/gba-link-sync` (same idea for a GBA).
 
@@ -174,6 +181,46 @@ fetched only for the S3 (target rule in `main/idf_component.yml`), and TinyUSB
 MIDI+CDC are enabled in `sdkconfig.defaults.esp32s3`. C3 code excludes all of
 this via `#if defined(CONFIG_IDF_TARGET_ESP32S3)`.
 
+## MIDI takeover (S3 only — coded, bench-pending)
+
+A second, mutually-exclusive use of the **same two port wires**: instead of the
+tempo counter, they become a **console-clocked serial link** that streams live
+MIDI note events to the tracker, which plays them on its own voices with its
+sequencer stopped — the console becomes a live multi-part MIDI sound module.
+**One firmware** serves both consoles: the bridge is a platform-agnostic
+MIDI→compact-frame *normaliser*; the channel→voice meaning is console-side.
+Concept + full contract in **`MIDI.md`**; the canonical wire spec is
+**`~/Documents/genmddj/MIDI.md` §3** (genmddj's console side is already built to
+it). Status: **milestones 1–2 done** (protocol locked, S3 firmware built);
+**bench-pending** (drive CLK from a 2nd MCU + logic analyser; verify the 5 V
+CLK-input electrical). The consoles' `midi_poll` shift-in is not written yet.
+
+- **Wire roles flip** (`config.h`): `PIN_MIDI_CLK = PIN_TR` — the **console**
+  drives it (clock master, idle low, samples DAT on the **rising** edge);
+  `PIN_MIDI_DAT = PIN_TH` — the **bridge** drives it open-drain, changing it on
+  the **falling** edge, **MSB-first**. So in takeover the ESP32 *reads* TR (a
+  5 V input from a real console — same regime the counter pads already survive;
+  `WIRING.md` recommends a divider / open-drain CLK to be safe).
+- **Frame** (`MIDI.md` §3): after an idle gap the bridge presents a leading
+  **flag** bit — `1` → a fixed 3-byte event follows (`status,d1,d2`; 25 bits
+  total), `0` → queue empty. `status = type<<4 | channel` (type: 1 NoteOff,
+  2 NoteOn, 3 CC, 4 PgmChange, 5 PitchBend, 7 Panic). Idle-gap resync means a
+  glitch can't desync for more than one burst.
+- **Implementation** (all `main/main.cpp`, `#if ESP32S3`): `forward_channel_voice()`
+  normalises raw USB-MIDI (NoteOn-vel0 → NoteOff, CC 120/123 → Panic, drops
+  aftertouch) and `evtq_push()` rings it into `g_evtq` (**CC coalesced** per
+  controller; **NoteOff is critical** — evicts the oldest rather than drop).
+  `clk_isr` (CLK falling-edge) + `present_bit_locked()` shift bits onto DAT;
+  `takeover_idle_check()` (off the presenter timer) does the idle-gap resync.
+  `wire_set_mode()` arbitrates the pins (reconfigures GPIO direction on
+  transition); `takeover_active()` engages it. Serial **`k <auto|on|off>`**
+  (AUTO follows recent channel-voice traffic); HUD reports evtq depth / CLK
+  edges / drops.
+- **Mutually exclusive with the counter** — `onPresenterTimer` bails (and calls
+  the idle check) whenever `g_wireMode != WIRE_COUNTER`. Takeover stops tracker
+  playback, so it never needs both at once; leaving takeover forces the
+  presenter to re-snap (`g_target = -1`).
+
 ## Gotchas (learned the hard way)
 
 - **Ableton "Start Stop Sync"** is a separate toggle from "Link". If it's off,
@@ -246,9 +293,17 @@ instance doesn't reconsider the dead end.
   register map (the slave side: port `$DD` bits, the counter protocol).
 - **`~/Documents/sms_tracker/DESIGN.md` §11** — the sync design (OUT/PULSE/IN).
 - **`~/Documents/ares-link-sync/link/`** — the Ableton Link SDK.
+- **`MIDI.md`** (this repo) + **`~/Documents/genmddj/MIDI.md` §3** — the MIDI-takeover
+  concept and the canonical console-clocked wire protocol.
+- **`~/Documents/genmddj/`** — the Mega Drive tracker (reads the same 2-bit counter;
+  its console side already implements the takeover `midi_dispatch`).
 
 ## Invariants
 
 - The counter **never runs backward** and applies **≤3 ticks per SMS frame**.
 - The bridge only ever **pulls the wire low** (open-drain); never drives 5 V.
+  (Exception: in MIDI takeover the ESP32 *reads* CLK/TR as a 5 V input — it still
+  never *drives* 5 V; DAT stays open-drain.)
 - 24 PPQN is fixed — it matches the tracker's groove-6 lock.
+- Counter sync and MIDI takeover are **mutually exclusive** on the two wires
+  (takeover stops tracker playback, so both are never needed at once).
