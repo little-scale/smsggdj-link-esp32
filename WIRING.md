@@ -88,6 +88,55 @@ Counted-not-timed, so PAL/NTSC region doesn't matter — genmddj's slave locks t
 groove-6 (24 PPQN) to match the wire. The same 3-wire cable also cross-syncs a Mega
 Drive directly to an SMS / Game Gear — genmddj ↔ SMSGGDJ.
 
+## MIDI takeover mode (S3) — same wires, different directions
+
+> ⚠ **Not yet hardware-verified.** The firmware + console both build to this; the wire
+> timing and the CLK-input electrical below still need a bench + a real console.
+
+MIDI takeover (`SYNC=MIDI` on the console; `k on`/auto on the bridge) reuses the **same
+three wires — no re-cabling**. Only the pin *directions* change, and the firmware
+(`wire_set_mode`) and console flip them automatically when the mode engages:
+
+| Line | DE-9 | Counter mode | **MIDI mode** |
+|------|------|--------------|---------------|
+| **CLK** | TR (pin 9) | bridge → console (counter bit 0) | **console → bridge** (clock master) |
+| **DAT** | TH (pin 7) | bridge → console (counter bit 1) | **bridge → console** (data, MSB-first) |
+| GND | pin 8 | shared | shared |
+
+- **DAT (TH, pin 7)** — electrically unchanged: the bridge drives it **open-drain**, the
+  console reads it. The **10 kΩ pull-up on pin 7** advised above applies here too (it's the
+  high level for the data line).
+- **CLK (TR, pin 9)** — the **new** direction: the *console* now drives it and the **ESP32
+  reads it as an input**. genmddj drives TR push-pull to ~**5 V**, but the ESP32 pin is
+  3.3 V. ⚠ **Mitigate the 5 V on the input:**
+  - **Simple + safe (recommended):** a resistor divider on the CLK line into the ESP32 —
+    e.g. **1.8 kΩ in series + 3.3 kΩ to GND** (≈ 3.2 V from 5 V). Two passives.
+  - **Zero-extra-parts alternative:** have genmddj drive CLK **open-drain** (toggle TR's
+    *direction* — output-low to assert, input/high-Z to release) with a **3.3 kΩ pull-up to
+    the XIAO 3V3 pad**; the line then never exceeds 3.3 V. Costs a small genmddj bit-bang
+    change (a direction toggle per edge in `midi_clock_bit`) — see `genmddj/MIDI.md §3`.
+
+Everything else (GND, don't-connect-+5 V, the S3 pad map D3=TR/D4=TH) is identical to the
+counter tables above.
+
+## Bench-testing the bridge (no console needed)
+
+Milestone-2 verification of the responder without a real MD/SMS:
+
+1. Flash the S3, open the serial console, and `k on` to force takeover.
+2. Send MIDI notes/CCs from a DAW over USB.
+3. **Drive CLK** (TR / GPIO4, through the divider) from a bench clock or a second MCU
+   emulating the console's `midi_clock_bit`: raise CLK, wait, read, lower CLK, wait
+   `~MIDI_SETTLE`. **Capture DAT** (TH / GPIO5) on a logic analyser.
+4. **Decode:** after an idle gap the bridge presents a **flag bit**; `1` → the next
+   **24 bits** are `status·d1·d2` (`status = type<<4|chan`); `0` → queue empty. Confirm the
+   decoded events match the MIDI you sent (NoteOn = type 2, etc.).
+5. Watch the serial **HUD** (`evtq` depth / `edges` / `drop`) and tune `MIDI_SETTLE` /
+   `TAKEOVER_IDLE_US` in `config.h` if frames misalign.
+
+A full loop test (real console clocking the bridge) also validates genmddj's `midi_poll`;
+until then this isolates the bridge side.
+
 ## XIAO ESP32-C3 pad layout (for orientation)
 
 USB connector at the top. D1/D2 are adjacent on the **left** rail; GND is on the
