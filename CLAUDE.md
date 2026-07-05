@@ -21,6 +21,12 @@ identical to the SMS sync rate — so it feeds the exact same presenter/counter 
 Link. See "Clock sources" below. The S3 also has a **MIDI takeover** mode (the
 same two wires stream live MIDI notes instead of clock — see "MIDI takeover").
 
+A **third, wired target** lives in `teensy/`: a **Teensy 4.1** that takes USB-MIDI
+from a DAW and drives the same two wires — **no WiFi, no Link**. It's a separate
+Arduino/Teensyduino sketch (different toolchain), not built by the ESP-IDF tree; it
+re-implements only the wired half (MIDI clock → counter, MIDI notes → takeover)
+against the same wire contract. See "Teensy target" below.
+
 Status: **C3 working on hardware.** The ESP-IDF firmware in `main/` joins Link,
 follows tempo/transport, launches on the next bar after start, and drives a real
 SMS via `SYNC: IN` in time (latency tuned out with a +75 ms offset). The **S3
@@ -220,6 +226,35 @@ CLK-input electrical). The consoles' `midi_poll` shift-in is not written yet.
   the idle check) whenever `g_wireMode != WIRE_COUNTER`. Takeover stops tracker
   playback, so it never needs both at once; leaving takeover forces the
   presenter to re-snap (`g_target = -1`).
+
+## Teensy target (`teensy/` — wired USB-MIDI, no WiFi/Link)
+
+A **Teensy 4.1** port of the *wired half only*: USB-MIDI clock → the 2-bit counter,
+USB-MIDI notes → the takeover responder. It drops Link, WiFi, the captive portal,
+and the TinyUSB composite descriptor (Teensy's built-in `usbMIDI` replaces it) — so
+it's a **simplification** of the S3's USB-MIDI path, not a full port. It's the
+answer to "wired, not WiFi" MIDI sync for both consoles.
+
+- **Separate toolchain, same repo, on purpose.** It's an **Arduino/Teensyduino
+  sketch** (`teensy/smsggdj_bridge_teensy/`), *not* built by the ESP-IDF tree — the
+  two never share a build, only the wire contract. It lives here (not a separate
+  repo) so this implementation stays next to `MIDI.md` and the ESP32 reference and
+  can't silently drift. Build in the Arduino IDE with **Board = Teensy 4.1**,
+  **USB Type = "Serial + MIDI"** (Serial = tuning console, MIDI = input).
+- **Files:** `config.h` (mirrors `main/config.h`), `midi_proto.h` (the portable
+  takeover frame layout + normalisation, mirroring `MIDI.md §3`), and the `.ino`
+  (presenter on an `IntervalTimer`, `clk_isr` via `attachInterrupt`, `noInterrupts()`
+  critical sections replacing the ESP32 `portMUX`, EEPROM for offset persistence).
+  The presenter/counter and takeover logic are line-for-line the ESP32's.
+- **⚠️ Teensy 4.x is NOT 5 V tolerant** (unlike the ESP32, which marginally survives
+  5 V on these pads). The console's lines idle at 5 V and drive CLK to 5 V in
+  takeover, so a **BSS138 bidirectional level shifter is required** on both lines
+  (open-drain both sides → preserves the exact semantics while clamping the Teensy
+  to 3.3 V). Full wiring + build in `teensy/README.md`.
+- **Serial commands:** `t`/`p`/`s`/`k` only. No `m` (ms offset — MIDI is reactive,
+  no Link timeline to sample against), no `c` (only one source), no `w` (no WiFi).
+- **Status: coded, not hardware-verified** (the counter path is a proven port; the
+  takeover responder mirrors the S3's, itself bench-pending).
 
 ## Gotchas (learned the hard way)
 

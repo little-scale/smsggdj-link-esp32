@@ -19,6 +19,14 @@ clock is 24 PPQN, exactly the SMS sync rate, so each clock byte is one tick. The
 S3 runs both sources and [picks between them](#clock-source-c3-vs-s3) (USB-MIDI
 when clock is flowing, else Link). The C3 has no USB-OTG, so it is Link-only.
 
+**Wired-only alternative — Teensy 4.1** ([`teensy/`](teensy/)): a separate
+Arduino/Teensyduino sketch for a **wired USB-MIDI** bridge with **no WiFi and no
+Link** — a DAW's USB-MIDI clock and notes drive the same two console wires. It
+implements just the wired half (MIDI clock → counter, MIDI notes →
+[MIDI takeover](MIDI.md)); Teensy's built-in `usbMIDI` makes it simpler than the
+S3. Note Teensy 4.x isn't 5 V tolerant, so it needs a level shifter — see
+[`teensy/README.md`](teensy/README.md).
+
 ## Hardware
 
 - **Board:** Seeed XIAO **ESP32-C3** (Link over WiFi) or **ESP32-S3** (Link +
