@@ -20,6 +20,9 @@ USB. It reuses the **existing 2-wire port link** that the bridge already drives 
 Link / MIDI-clock **tempo sync on both consoles** — no new hardware.
 
 - **MIDI channel → voice/track** (each console maps to its own voices).
+- **One channel = one monophonic voice** — no polyphony, no voice-stealing; a new note
+  on a channel replaces that channel's current note. Matches each tracker's
+  mono-per-track model and keeps the console side trivial.
 - **Program change → instrument select; velocity → volume; note-off → envelope release.**
 - Each note plays exactly as a **sequenced step** would on that console, so the voice's
   instrument decides its character (PSG tone / noise / FM / wave / PCM, per platform).
@@ -45,6 +48,10 @@ console-agnostic — both consoles read the same counter the same way.)
 
 ## 3. Shared wire protocol
 
+Keeping to **exactly two wires** (1 data bit, not a wider parallel transfer) is a
+deliberate hardware-minimisation choice. It's fast enough because takeover is
+**monophonic** and carries **no concurrent clock** — the wires do nothing but note data.
+
 Same two port lines as the sync bridge, **repurposed by direction** in MIDI mode:
 
 - **CLK** — the *console* drives it (console is clock master).
@@ -57,7 +64,20 @@ polling timing. The console drains the FIFO each frame.
 - **status byte** has bit 7 **set** (`0x8n/0x9n/0xBn/0xCn/0xEn`), low nibble = **MIDI
   channel 0–15**;
 - **data byte** has bit 7 **clear** (0–127);
-- **`0x00`** = FIFO-empty sentinel; **DAT-while-CLK-idle** = events-pending flag.
+- **`0x00`** read *in the status position* = FIFO empty. The console's poll each frame is
+  just "clock one status byte; if `0x00`, nothing's waiting." **No separate pending line**
+  (simpler, and it removes a stale-DAT race the earlier draft had). A real `0x00` data byte
+  (note 0, velocity 0, CC/bend value 0) is never ambiguous — the console counts data bytes
+  by status;
+- **note-on with velocity 0 = note-off** (release);
+- **every message carries its status byte** — no MIDI running status (USB-MIDI packets
+  are always complete), so the console parser stays stateless.
+
+**Bit clocking (implemented on the bridge, S3):** the console generates CLK; the bridge
+drives DAT open-drain and advances to the next bit on each **CLK falling edge**,
+**MSB-first**, 8 edges per byte. The console samples DAT **≥ ~5 µs after** driving CLK low
+(covers the ESP32's GPIO-ISR latency). Idle DAT is released high. A byte read as a status
+whose top nibble is `8/9/B/C/E` tells the console to clock 2 more data bytes (1 for `C`).
 
 **Key cross-platform point: the low nibble carries the MIDI channel (0–15), not a
 narrowed track index.** Each console filters/maps:
@@ -72,11 +92,17 @@ narrowed track index.** Each console filters/maps:
    - genmddj: 68000, controller **data**/**control** registers (`$A10003…`, `$A10009…`)
      — the same TR/TH lines the sync already uses.
 2. **Mode entry/exit** — stop the sequencer, lock transport, init/teardown, silence.
+   The sequencer is **fully stopped** — no tracker playback during takeover — so there's
+   no clock to interleave and timing stays simple. Consequence: tempo-synced effects
+   (LFO-to-tempo, arps) **free-run** rather than lock to the DAW. On exit, drain the FIFO
+   and kill any held notes (handle CC 123 all-notes-off / panic too).
 3. **Channel → voice map** + per-voice MIDI state (current instrument, active note).
 4. **Note → pitch** (platform note tables), **velocity → volume**, **PC → instrument**.
 5. **Trigger / release** reusing the existing note-trigger and note-release/envelope
    paths — and, while the transport is stopped, the existing envelope/render pass
-   draws it (true on SMSGGDJ; genmddj should have an equivalent stopped-render path).
+   draws it (true on SMSGGDJ; on genmddj the **INSTR note-audition** path already
+   triggers + renders a note with the sequencer stopped — generalise that trigger and
+   the per-tick envelope/LFO/table/SCB pass to run from the MIDI source).
 
 ## 5. Platform differences to account for
 
@@ -100,26 +126,47 @@ already do for `SYNC: OUT`.
   the pending flag while idle. Open-drain, same electrical contract as the counter.
 - **Mode arbitration** — note traffic → serial responder (drive DAT only, let the
   console own CLK); Link / MIDI-clock → the existing 2-bit counter presenter (drive
-  both). Mutually exclusive on the 2 wires; identical for both consoles.
+  both). Mutually exclusive on the 2 wires; identical for both consoles. Takeover never
+  needs both at once (it stops tracker playback), so the exclusivity costs nothing.
 - **S3-only** (USB-OTG). One S3 firmware image drives either console.
 
 ## 7. Milestones
 
 1. **Lock the shared protocol** — channel-preserving byte stream; each tracker's
    `MIDI.md` masks the low nibble to its channel range.
-2. **One firmware** — RX→FIFO + console-clocked responder (platform-agnostic), bench-
-   verified over the CDC console + a logic analyser (drive CLK from a second MCU).
+2. **One firmware** — RX→FIFO + console-clocked responder (platform-agnostic). **Built
+   (S3):** `forward_channel_voice` → `g_fifo` ring, the `clk_isr` shift-out responder, and
+   `wire_set_mode` arbitration (channel-voice → takeover, else the Link/MIDI-clock counter)
+   in `main/main.cpp`; serial `k <auto|on|off>` forces the mode; HUD reports fifo depth /
+   CLK edges / drops. **Bench-pending:** drive CLK from a second MCU + logic analyser to
+   confirm the byte stream, then check the CLK-input electrical (5 V on an ESP32 input).
 3. **SMSGGDJ MIDI takeover** — per the SMSGGDJ `MIDI.md`.
 4. **genmddj MIDI takeover** — mirror it with 68000 port I/O + the MD voice map; write
    the genmddj `MIDI.md`.
 5. **Hardware bring-up** on both consoles + the S3.
 
-## 8. Open questions
+## 8. Settled decisions (2026-07-05)
+
+Load-bearing choices that later work builds against — don't re-litigate without changing
+them deliberately here:
+
+- **Monophonic per channel.** No polyphony, no voice-stealing (§1). A DAW addresses each
+  console voice as its own MIDI channel.
+- **Exactly two wires, 1-bit serial** (§3). No wider parallel transfer — hardware stays
+  minimal; monophonic + clockless takeover keeps it fast enough.
+- **Pure takeover: no concurrent clock.** The sequencer stops entirely; the wires carry
+  only note data, and tempo-synced effects free-run (§2, §4.2). This is what makes the
+  timing simple.
+- **≤ 128 instruments**, so **Program Change 0–127 maps 1:1** to the instrument pool — no
+  bank-select / NRPN needed.
+
+## 9. Open questions
 
 - genmddj's exact voice/track model and how many MIDI channels it exposes.
 - A **shared channel convention** so a DAW setup ports between consoles — e.g. ch 1–4
   always the SN76489 PSG (works on both), MD adding ch 5–10 for YM2612 FM.
 - CC / pitch-bend mapping per platform (volume trim, pitch bend → the `P`-command feel).
-- **Clock-in-stream:** fold 24-PPQN clock into the same serial stream as note events, so
-  one link carries **tempo *and* notes** — a path to MIDI-driven playback (not just
-  takeover) later, again shared by both consoles.
+- **Clock-in-stream — not pursued.** Takeover stops tracker playback, so the wires never
+  carry tempo and notes together; tempo-synced effects free-run. A future MIDI-*playback*
+  mode (not just takeover) could revisit folding 24-PPQN clock into the stream, but that
+  is explicitly out of scope here.

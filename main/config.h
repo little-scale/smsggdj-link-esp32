@@ -49,6 +49,28 @@
 // accident; change the status byte here to remap it.)
 #define MIDI_PORTAL_TRIGGER_STATUS 0xEF
 
+// --- MIDI takeover (ESP32-S3 only): live console-clocked note stream ----------
+// In takeover mode the two port wires stop being the sync counter and become a
+// console-clocked serial link that streams raw MIDI voice bytes to the tracker,
+// which plays them live on its own voices (the sequencer is stopped). Same two
+// pins as the counter -- the two modes are mutually exclusive. Roles:
+//   PIN_MIDI_CLK  the CONSOLE drives (bridge reads) -- one edge per bit, master
+//   PIN_MIDI_DAT  the BRIDGE drives open-drain (console reads) -- data, MSB-first
+// The bridge advances DAT to the next bit on each CLK FALLING edge, so the
+// console samples DAT >= ~5 us after driving CLK low (covers ESP32 ISR latency).
+// A byte is 8 clocks; a byte read in the status position that is 0x00 = FIFO
+// empty, else it is a MIDI status (bit 7 set) and the console clocks its data
+// bytes. Self-framing, no separate pending line.
+//
+// ELECTRICAL: reading CLK puts the console's (5 V) drive on an ESP32 input --
+// the same 5 V that already sits on the counter's open-drain pads when released,
+// so it's the same regime the C3 counter already survives on hardware. Verify on
+// the S3; add a series resistor / level shift on CLK if a real console misbehaves.
+#define PIN_MIDI_CLK   PIN_TH   // console -> bridge : clock (falling edge = next bit)
+#define PIN_MIDI_DAT   PIN_TR   // bridge  -> console : data, open-drain, MSB-first
+#define TAKEOVER_TIMEOUT_US  500000  // no channel-voice msg for this long -> back to counter (AUTO)
+#define MIDI_FIFO_SIZE       256     // raw-MIDI-byte ring awaiting the console (power of two)
+
 // --- Alignment offsets (by-ear latency compensation) ---
 // Fallback defaults used only when nothing is stored in NVS. Tune live over
 // serial (see main.cpp), `s` to persist; or bake your final value in here.

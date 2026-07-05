@@ -77,6 +77,14 @@ extern "C" bool __atomic_is_lock_free(std::size_t size, const volatile void*) {
 static portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 static volatile long long g_target = -1;  // <0 = stopped/armed (freeze)
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+// Which role the two port wires currently serve. COUNTER = the Link/MIDI-clock
+// sync presenter owns them; TAKEOVER = the console-clocked MIDI note responder
+// owns them (mutually exclusive). Declared here so the presenter ISR can bail.
+enum WireMode { WIRE_COUNTER = 0, WIRE_TAKEOVER = 1 };
+static volatile WireMode g_wireMode = WIRE_COUNTER;
+#endif
+
 static inline void writeCounter(uint8_t count) {
   // Open-drain: level 1 releases the line (SMS pull-up -> logic 1); level 0
   // drives it to ground (logic 0). So the bit value maps straight to the level.
@@ -86,6 +94,9 @@ static inline void writeCounter(uint8_t count) {
 
 static bool IRAM_ATTR onPresenterTimer(gptimer_handle_t,
                                        const gptimer_alarm_event_data_t*, void*) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  if (g_wireMode != WIRE_COUNTER) return false;  // takeover owns the pins
+#endif
   long long target;
   portENTER_CRITICAL_ISR(&g_mux);
   target = g_target;
@@ -545,6 +556,7 @@ static void offsets_help() {
          "p (print)"
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
          " | c <auto|link|midi> (clock source)"
+         " | k <auto|on|off> (MIDI takeover)"
 #endif
          " | w (WiFi setup)\n");
 }
@@ -573,6 +585,10 @@ static void open_portal_once() {
 }
 #endif
 
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+static void set_takeover(const char* arg);  // defined in the takeover module below
+#endif
+
 static void handle_command(char* s) {
   while (*s == ' ' || *s == '\t') s++;
   const char c = *s;
@@ -586,6 +602,11 @@ static void handle_command(char* s) {
     case 's': offsets_save(); break;
     case 'p': offsets_print(); break;
     case 'c': set_source(s + 1); break;
+    case 'k':
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+      set_takeover(s + 1);
+#endif
+      break;
     case 'w':
       wifi_creds_clear();
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
@@ -720,6 +741,146 @@ static void midi_handle_status(uint8_t status) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// MIDI takeover: stream raw MIDI voice bytes to the console over the two port
+// wires, console-clocked, so the tracker plays them live on its own voices with
+// its sequencer stopped (see MIDI.md). Mutually exclusive with the sync counter.
+//
+// The console is the clock master. PIN_MIDI_DAT (bridge, open-drain) carries one
+// data bit per CLK falling edge, MSB-first; a byte is 8 edges. The console reads
+// a byte in the "status position": 0x00 = FIFO empty (stop), else a MIDI status
+// (bit 7 set) whose data bytes it then clocks (2 for 8x/9x/Bx/Ex, 1 for Cx).
+// Self-framing; no running status; note-on velocity 0 = note-off.
+// ---------------------------------------------------------------------------
+
+// A raw-MIDI-byte ring, produced by the USB task and consumed by the CLK ISR.
+// Guarded by a spinlock (short critical sections) rather than SPSC indices,
+// because the overflow policy lets the producer evict from the tail.
+static portMUX_TYPE g_fifoMux = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t g_fifo[MIDI_FIFO_SIZE];
+// Not volatile: every access is inside the g_fifoMux spinlock (a full barrier),
+// so volatile would only add the deprecated RMW warnings without buying ordering.
+static uint16_t g_fHead = 0, g_fTail = 0;  // free-running; index = x & (SIZE-1)
+static uint32_t g_clkEdges = 0;            // HUD: CLK edges served
+static uint32_t g_dropped  = 0;            // HUD: bytes lost to overflow
+
+static inline uint16_t fifo_count() { return (uint16_t)(g_fHead - g_fTail); }
+
+// Push a whole message atomically. A note-off is `critical`: never dropped -- it
+// evicts the oldest bytes to fit, so a release can't be lost (no stuck notes).
+// Non-critical messages (note-on, CC, bend, PC) are dropped whole when full.
+static void fifo_push_msg(const uint8_t* b, int n, bool critical) {
+  portENTER_CRITICAL(&g_fifoMux);
+  if ((int)(MIDI_FIFO_SIZE - fifo_count()) < n) {
+    if (!critical) { g_dropped += n; portEXIT_CRITICAL(&g_fifoMux); return; }
+    while ((int)(MIDI_FIFO_SIZE - fifo_count()) < n) { g_fTail++; g_dropped++; }
+  }
+  for (int i = 0; i < n; i++) g_fifo[(g_fHead++) & (MIDI_FIFO_SIZE - 1)] = b[i];
+  portEXIT_CRITICAL(&g_fifoMux);
+}
+
+static inline uint8_t IRAM_ATTR fifo_pop_isr() {
+  uint8_t b = 0x00;  // empty -> 0x00 (the "empty" sentinel in the status position)
+  portENTER_CRITICAL_ISR(&g_fifoMux);
+  if (fifo_count() > 0) b = g_fifo[(g_fTail++) & (MIDI_FIFO_SIZE - 1)];
+  portEXIT_CRITICAL_ISR(&g_fifoMux);
+  return b;
+}
+
+// Console-clocked shift-out: present the next bit (MSB-first) on each CLK edge,
+// reloading a byte from the FIFO every 8 bits (0x00 when empty).
+static uint8_t g_txShift = 0;  // only touched by clk_isr (single context)
+static uint8_t g_txBits  = 0;
+static void IRAM_ATTR clk_isr(void*) {
+  if (g_txBits == 0) { g_txShift = fifo_pop_isr(); g_txBits = 8; }
+  gpio_set_level(PIN_MIDI_DAT, (g_txShift & 0x80) ? 1 : 0);  // OD: 1=release, 0=low
+  g_txShift = (uint8_t)(g_txShift << 1);
+  g_txBits--;
+  g_clkEdges++;
+}
+
+// Takeover engagement: AUTO follows recent channel-voice traffic; ON/OFF force it.
+enum TakeoverMode { TK_AUTO = 0, TK_ON = 1, TK_OFF = 2 };
+static std::atomic<int> g_takeoverMode{TK_AUTO};
+static std::atomic<int64_t> g_takeoverLastUs{0};
+
+static bool takeover_active() {
+  const int m = g_takeoverMode.load();
+  if (m == TK_OFF) return false;
+  if (!tud_midi_mounted()) return false;
+  if (m == TK_ON) return true;
+  return (esp_timer_get_time() - g_takeoverLastUs.load()) < TAKEOVER_TIMEOUT_US;
+}
+
+// Reconfigure the two wires for the requested role. Only touches hardware on a
+// real transition. Called from the loop task (does gpio_config, not ISR-safe).
+static void wire_set_mode(WireMode m) {
+  if (m == g_wireMode) return;
+  if (m == WIRE_TAKEOVER) {
+    gpio_set_level(PIN_MIDI_DAT, 1);           // DAT idle = released high
+    g_txBits = 0;
+    gpio_config_t in = {};
+    in.pin_bit_mask = 1ULL << PIN_MIDI_CLK;
+    in.mode = GPIO_MODE_INPUT;
+    in.pull_up_en = GPIO_PULLUP_ENABLE;        // idle-high CLK; console pulls it low
+    in.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    in.intr_type = GPIO_INTR_NEGEDGE;          // falling edge = "give me the next bit"
+    ESP_ERROR_CHECK(gpio_config(&in));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_MIDI_CLK, clk_isr, nullptr));
+  } else {
+    gpio_isr_handler_remove(PIN_MIDI_CLK);
+    gpio_config_t od = {};
+    od.pin_bit_mask = (1ULL << PIN_TR) | (1ULL << PIN_TH);
+    od.mode = GPIO_MODE_OUTPUT_OD;
+    od.pull_up_en = GPIO_PULLUP_DISABLE;
+    od.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    od.intr_type = GPIO_INTR_DISABLE;
+    ESP_ERROR_CHECK(gpio_config(&od));
+    writeCounter(0);                            // release both lines
+    portENTER_CRITICAL(&g_mux);
+    g_target = -1;                              // force the presenter to re-snap
+    portEXIT_CRITICAL(&g_mux);
+  }
+  g_wireMode = m;
+}
+
+// USB-MIDI channel-voice message length (data bytes), or -1 if not channel-voice.
+static int cv_data_len(uint8_t status) {
+  switch (status & 0xF0) {
+    case 0x80: case 0x90: case 0xA0: case 0xB0: case 0xE0: return 2;
+    case 0xC0: case 0xD0: return 1;
+    default: return -1;
+  }
+}
+
+// Forward a channel-voice USB-MIDI packet into the takeover FIFO. Per MIDI.md 2
+// we carry note off/on, CC, program change and pitch bend on all 16 channels;
+// poly-aftertouch (0xA0) and channel pressure (0xD0) are dropped.
+static void forward_channel_voice(const uint8_t* pkt) {
+  const uint8_t status = pkt[1];
+  const int len = cv_data_len(status);
+  if (len < 0) return;
+  const uint8_t hi = status & 0xF0;
+  if (!(hi == 0x80 || hi == 0x90 || hi == 0xB0 || hi == 0xC0 || hi == 0xE0)) return;
+  uint8_t msg[3];
+  msg[0] = status;
+  msg[1] = pkt[2];
+  if (len == 2) msg[2] = pkt[3];
+  const bool noteoff = (hi == 0x80) || (hi == 0x90 && pkt[3] == 0);  // never drop a release
+  fifo_push_msg(msg, 1 + len, noteoff);
+  g_takeoverLastUs = esp_timer_get_time();
+}
+
+// Parse the `k` takeover-mode command argument.
+static void set_takeover(const char* arg) {
+  while (*arg == ' ') arg++;
+  int m = TK_AUTO;
+  if (!std::strncmp(arg, "on", 2)) m = TK_ON;
+  else if (!std::strncmp(arg, "off", 3)) m = TK_OFF;
+  g_takeoverMode = m;
+  printf(">> MIDI takeover: %s\n", m == TK_ON ? "on" : m == TK_OFF ? "off" : "auto");
+}
+
 // Drain inbound USB-MIDI packets, pulling out the real-time status bytes.
 static void midi_poll_task(void*) {
   uint8_t pkt[4];
@@ -731,9 +892,11 @@ static void midi_poll_task(void*) {
       // byte 1 (CIN 0xF). Scan bytes 1..3 defensively for >=0xF8.
       for (int i = 1; i < 4; i++)
         if (pkt[i] >= 0xF8) midi_handle_status(pkt[i]);
-      // Channel-voice trigger: a pitch bend on ch16 (byte 1 is the channel
-      // status byte) opens the WiFi setup portal -- a no-serial escape hatch.
+      // Channel-voice: a pitch bend on ch16 (byte 1 is the channel status byte)
+      // opens the WiFi setup portal -- a no-serial escape hatch; every other
+      // channel-voice message is forwarded to the takeover FIFO.
       if (pkt[1] == MIDI_PORTAL_TRIGGER_STATUS) open_portal_once();
+      else forward_channel_voice(pkt);
     }
     if (!got) vTaskDelay(1);  // ~1 ms when idle
   }
@@ -838,6 +1001,7 @@ extern "C" void app_main() {
 
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
   wifi_start_background();  // Link optional; non-blocking, no auto-portal
+  ESP_ERROR_CHECK(gpio_install_isr_service(0));  // for the takeover CLK edge ISR
   xTaskCreate(midi_poll_task, "midi", 4096, nullptr, 6, nullptr);
 #else
   wifi_connect();           // Link mandatory; blocks / hosts portal
@@ -854,6 +1018,11 @@ extern "C" void app_main() {
   int64_t lastHud = 0;
   int lastSrc = -1;  // 0=Link, 1=MIDI; for presenter resync on a source switch
   while (true) {
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    // Arbitrate the two wires: channel-voice MIDI -> takeover responder, else
+    // the Link/MIDI-clock counter. No-ops unless the role actually changes.
+    wire_set_mode(takeover_active() ? WIRE_TAKEOVER : WIRE_COUNTER);
+#endif
     bool usedMidi = false;
     long long t = computeActiveTarget(usedMidi);
 
@@ -878,6 +1047,12 @@ extern "C" void app_main() {
       ESP_LOGI(TAG, "src=%s peers=%u tempo=%.1f playing=%d target=%lld off=%dms/%dt",
                usedMidi ? "midi" : "link", (unsigned)link.numPeers(), s.tempo(),
                (int)s.isPlaying(), t, g_offsetMs.load(), g_offsetTicks.load());
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+      if (g_wireMode == WIRE_TAKEOVER || g_takeoverMode.load() != TK_AUTO)
+        ESP_LOGI(TAG, "  takeover=%s fifo=%u edges=%lu drop=%lu",
+                 (g_wireMode == WIRE_TAKEOVER) ? "ON" : "off", (unsigned)fifo_count(),
+                 (unsigned long)g_clkEdges, (unsigned long)g_dropped);
+#endif
     }
     vTaskDelay(1);  // ~1 ms
   }
