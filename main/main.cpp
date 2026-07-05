@@ -83,6 +83,7 @@ static volatile long long g_target = -1;  // <0 = stopped/armed (freeze)
 // owns them (mutually exclusive). Declared here so the presenter ISR can bail.
 enum WireMode { WIRE_COUNTER = 0, WIRE_TAKEOVER = 1 };
 static volatile WireMode g_wireMode = WIRE_COUNTER;
+static void IRAM_ATTR takeover_idle_check();  // fwd; defined in the takeover module
 #endif
 
 static inline void writeCounter(uint8_t count) {
@@ -95,7 +96,7 @@ static inline void writeCounter(uint8_t count) {
 static bool IRAM_ATTR onPresenterTimer(gptimer_handle_t,
                                        const gptimer_alarm_event_data_t*, void*) {
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
-  if (g_wireMode != WIRE_COUNTER) return false;  // takeover owns the pins
+  if (g_wireMode != WIRE_COUNTER) { takeover_idle_check(); return false; }  // takeover owns the pins
 #endif
   long long target;
   portENTER_CRITICAL_ISR(&g_mux);
@@ -742,61 +743,108 @@ static void midi_handle_status(uint8_t status) {
 }
 
 // ---------------------------------------------------------------------------
-// MIDI takeover: stream raw MIDI voice bytes to the console over the two port
-// wires, console-clocked, so the tracker plays them live on its own voices with
-// its sequencer stopped (see MIDI.md). Mutually exclusive with the sync counter.
+// MIDI takeover: stream MIDI note events to the console over the two port wires,
+// console-clocked, so the tracker plays them live on its own voices with its
+// sequencer stopped. Protocol = genmddj's MIDI.md 3 (the console side is built to
+// it). Mutually exclusive with the sync counter.
 //
-// The console is the clock master. PIN_MIDI_DAT (bridge, open-drain) carries one
-// data bit per CLK falling edge, MSB-first; a byte is 8 edges. The console reads
-// a byte in the "status position": 0x00 = FIFO empty (stop), else a MIDI status
-// (bit 7 set) whose data bytes it then clocks (2 for 8x/9x/Bx/Ex, 1 for Cx).
-// Self-framing; no running status; note-on velocity 0 = note-off.
+// The console is the clock master (idle CLK low; pulses low->high->low, samples
+// DAT on the RISING edge). The bridge drives DAT open-drain and changes it on the
+// FALLING edge, MSB-first. After an idle gap the bridge presents a leading FLAG
+// bit while idle; 1 => a fixed 3-byte frame (status,d1,d2) follows, 0 => queue
+// empty. status = type<<4 | channel. Raw MIDI is normalised here into these
+// compact frames (running status already expanded by USB-MIDI; NoteOn vel0 ->
+// NoteOff; CC 120/123 -> Panic) and CC is coalesced, so the console parser is a
+// bounded type switch. Each event on the wire = 1 flag + 24 bits = 25 bits.
 // ---------------------------------------------------------------------------
 
-// A raw-MIDI-byte ring, produced by the USB task and consumed by the CLK ISR.
-// Guarded by a spinlock (short critical sections) rather than SPSC indices,
-// because the overflow policy lets the producer evict from the tail.
+// A ring of normalised events, produced by the USB task and consumed (bit by bit)
+// by the CLK ISR + the idle watchdog. One spinlock guards both the queue and the
+// shift register (the overflow policy evicts from the tail, and two ISRs plus the
+// task all touch the shift state, so SPSC indices aren't enough).
+struct midi_evt { uint8_t status, d1, d2; };
 static portMUX_TYPE g_fifoMux = portMUX_INITIALIZER_UNLOCKED;
-static uint8_t g_fifo[MIDI_FIFO_SIZE];
-// Not volatile: every access is inside the g_fifoMux spinlock (a full barrier),
-// so volatile would only add the deprecated RMW warnings without buying ordering.
-static uint16_t g_fHead = 0, g_fTail = 0;  // free-running; index = x & (SIZE-1)
-static uint32_t g_clkEdges = 0;            // HUD: CLK edges served
-static uint32_t g_dropped  = 0;            // HUD: bytes lost to overflow
+static midi_evt g_evtq[MIDI_EVTQ_SIZE];
+static uint16_t g_eHead = 0, g_eTail = 0;   // free-running; index = x & (SIZE-1)
+static uint32_t g_sr = 0;                   // shift register, next bit left-justified in bit 31
+static int      g_srBits = 0;               // bits left in g_sr (0 => reload on next present)
+static int64_t  g_lastClkUs = 0;            // last CLK edge time (for idle-gap detection)
+static bool     g_idleArmed = false;        // flag already presented for the current idle gap
+static uint32_t g_clkEdges = 0;             // HUD: CLK edges served
+static uint32_t g_dropped  = 0;             // HUD: events lost to overflow
 
-static inline uint16_t fifo_count() { return (uint16_t)(g_fHead - g_fTail); }
+static inline uint16_t evtq_count() { return (uint16_t)(g_eHead - g_eTail); }
 
-// Push a whole message atomically. A note-off is `critical`: never dropped -- it
-// evicts the oldest bytes to fit, so a release can't be lost (no stuck notes).
-// Non-critical messages (note-on, CC, bend, PC) are dropped whole when full.
-static void fifo_push_msg(const uint8_t* b, int n, bool critical) {
-  portENTER_CRITICAL(&g_fifoMux);
-  if ((int)(MIDI_FIFO_SIZE - fifo_count()) < n) {
-    if (!critical) { g_dropped += n; portEXIT_CRITICAL(&g_fifoMux); return; }
-    while ((int)(MIDI_FIFO_SIZE - fifo_count()) < n) { g_fTail++; g_dropped++; }
+// Load the next wire frame into the shift register (caller holds g_fifoMux):
+// a queued event -> flag 1 + status:d1:d2 (25 bits), else flag 0 (1 bit).
+static void IRAM_ATTR load_frame_locked() {
+  if (evtq_count() > 0) {
+    const midi_evt e = g_evtq[g_eTail++ & (MIDI_EVTQ_SIZE - 1)];
+    const uint32_t f = (1u << 24) | ((uint32_t)e.status << 16) |
+                       ((uint32_t)e.d1 << 8) | e.d2;
+    g_sr = f << (32 - 25);   // MSB (the flag) now sits in bit 31
+    g_srBits = 25;
+  } else {
+    g_sr = 0;                // flag = 0 (empty)
+    g_srBits = 1;
   }
-  for (int i = 0; i < n; i++) g_fifo[(g_fHead++) & (MIDI_FIFO_SIZE - 1)] = b[i];
-  portEXIT_CRITICAL(&g_fifoMux);
 }
 
-static inline uint8_t IRAM_ATTR fifo_pop_isr() {
-  uint8_t b = 0x00;  // empty -> 0x00 (the "empty" sentinel in the status position)
-  portENTER_CRITICAL_ISR(&g_fifoMux);
-  if (fifo_count() > 0) b = g_fifo[(g_fTail++) & (MIDI_FIFO_SIZE - 1)];
-  portEXIT_CRITICAL_ISR(&g_fifoMux);
-  return b;
+// Present the next bit on DAT and advance (caller holds g_fifoMux). Reloads a
+// fresh frame when the current one is exhausted -- within a burst events run
+// back-to-back (…1·s·d1·d2·1·s·d1·d2·…·0), and a fresh burst resyncs via the
+// idle watchdog forcing g_srBits = 0 first.
+static void IRAM_ATTR present_bit_locked() {
+  if (g_srBits == 0) load_frame_locked();
+  const int bit = (int)((g_sr >> 31) & 1u);
+  g_sr <<= 1;
+  g_srBits--;
+  gpio_set_level(PIN_MIDI_DAT, bit);   // OD: 1 = release (console pull-up), 0 = low
 }
 
-// Console-clocked shift-out: present the next bit (MSB-first) on each CLK edge,
-// reloading a byte from the FIFO every 8 bits (0x00 when empty).
-static uint8_t g_txShift = 0;  // only touched by clk_isr (single context)
-static uint8_t g_txBits  = 0;
+// CLK falling edge: the console has sampled the current bit -> present the next.
 static void IRAM_ATTR clk_isr(void*) {
-  if (g_txBits == 0) { g_txShift = fifo_pop_isr(); g_txBits = 8; }
-  gpio_set_level(PIN_MIDI_DAT, (g_txShift & 0x80) ? 1 : 0);  // OD: 1=release, 0=low
-  g_txShift = (uint8_t)(g_txShift << 1);
-  g_txBits--;
+  portENTER_CRITICAL_ISR(&g_fifoMux);
+  g_lastClkUs = esp_timer_get_time();
+  g_idleArmed = false;
+  present_bit_locked();
   g_clkEdges++;
+  portEXIT_CRITICAL_ISR(&g_fifoMux);
+}
+
+// Called from the presenter timer ISR while in takeover: once CLK has been quiet
+// for TAKEOVER_IDLE_US we're between bursts -> resync and present a fresh flag bit
+// so it's stable before the console's next rising edge (idle-gap resync).
+static void IRAM_ATTR takeover_idle_check() {
+  const int64_t now = esp_timer_get_time();
+  portENTER_CRITICAL_ISR(&g_fifoMux);
+  if (!g_idleArmed && (now - g_lastClkUs) > TAKEOVER_IDLE_US) {
+    g_idleArmed = true;
+    g_srBits = 0;              // drop any partial frame; reload from the flag
+    present_bit_locked();
+  }
+  portEXIT_CRITICAL_ISR(&g_fifoMux);
+}
+
+// Enqueue a normalised event. CC (type 3) coalesces: an unread same-channel,
+// same-controller CC has its value replaced in place (a knob sweep collapses to
+// one queue slot). A NoteOff is `critical` -> never dropped (evicts the oldest to
+// fit, so a release can't be lost); other events drop when the queue is full.
+static void evtq_push(uint8_t status, uint8_t d1, uint8_t d2, bool critical) {
+  portENTER_CRITICAL(&g_fifoMux);
+  if ((status & 0xF0) == (3u << 4)) {
+    for (uint16_t i = g_eTail; i != g_eHead; i++) {
+      midi_evt& e = g_evtq[i & (MIDI_EVTQ_SIZE - 1)];
+      if (e.status == status && e.d1 == d1) { e.d2 = d2; portEXIT_CRITICAL(&g_fifoMux); return; }
+    }
+  }
+  if (evtq_count() >= MIDI_EVTQ_SIZE) {
+    if (!critical) { g_dropped++; portEXIT_CRITICAL(&g_fifoMux); return; }
+    g_eTail++; g_dropped++;   // evict the oldest so the note-off fits
+  }
+  midi_evt& e = g_evtq[g_eHead++ & (MIDI_EVTQ_SIZE - 1)];
+  e.status = status; e.d1 = d1; e.d2 = d2;
+  portEXIT_CRITICAL(&g_fifoMux);
 }
 
 // Takeover engagement: AUTO follows recent channel-voice traffic; ON/OFF force it.
@@ -818,13 +866,16 @@ static void wire_set_mode(WireMode m) {
   if (m == g_wireMode) return;
   if (m == WIRE_TAKEOVER) {
     gpio_set_level(PIN_MIDI_DAT, 1);           // DAT idle = released high
-    g_txBits = 0;
+    portENTER_CRITICAL(&g_fifoMux);
+    g_srBits = 0; g_idleArmed = false; g_lastClkUs = esp_timer_get_time();
+    present_bit_locked();                      // put a defined (flag) bit on DAT now
+    portEXIT_CRITICAL(&g_fifoMux);
     gpio_config_t in = {};
     in.pin_bit_mask = 1ULL << PIN_MIDI_CLK;
     in.mode = GPIO_MODE_INPUT;
-    in.pull_up_en = GPIO_PULLUP_ENABLE;        // idle-high CLK; console pulls it low
-    in.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    in.intr_type = GPIO_INTR_NEGEDGE;          // falling edge = "give me the next bit"
+    in.pull_up_en = GPIO_PULLUP_DISABLE;
+    in.pull_down_en = GPIO_PULLDOWN_ENABLE;    // idle-low CLK (console drives it), defined when unplugged
+    in.intr_type = GPIO_INTR_NEGEDGE;          // falling edge = the console has sampled; present the next bit
     ESP_ERROR_CHECK(gpio_config(&in));
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_MIDI_CLK, clk_isr, nullptr));
   } else {
@@ -844,30 +895,35 @@ static void wire_set_mode(WireMode m) {
   g_wireMode = m;
 }
 
-// USB-MIDI channel-voice message length (data bytes), or -1 if not channel-voice.
-static int cv_data_len(uint8_t status) {
-  switch (status & 0xF0) {
-    case 0x80: case 0x90: case 0xA0: case 0xB0: case 0xE0: return 2;
-    case 0xC0: case 0xD0: return 1;
-    default: return -1;
-  }
-}
-
-// Forward a channel-voice USB-MIDI packet into the takeover FIFO. Per MIDI.md 2
-// we carry note off/on, CC, program change and pitch bend on all 16 channels;
-// poly-aftertouch (0xA0) and channel pressure (0xD0) are dropped.
+// Normalise a channel-voice USB-MIDI packet into a compact event and enqueue it.
+// type<<4|channel per MIDI.md 3.4: 1=NoteOff 2=NoteOn 3=CC 4=PgmChange 5=Bend
+// 7=Panic. Drops poly-aftertouch (0xA0) and channel pressure (0xD0).
 static void forward_channel_voice(const uint8_t* pkt) {
-  const uint8_t status = pkt[1];
-  const int len = cv_data_len(status);
-  if (len < 0) return;
-  const uint8_t hi = status & 0xF0;
-  if (!(hi == 0x80 || hi == 0x90 || hi == 0xB0 || hi == 0xC0 || hi == 0xE0)) return;
-  uint8_t msg[3];
-  msg[0] = status;
-  msg[1] = pkt[2];
-  if (len == 2) msg[2] = pkt[3];
-  const bool noteoff = (hi == 0x80) || (hi == 0x90 && pkt[3] == 0);  // never drop a release
-  fifo_push_msg(msg, 1 + len, noteoff);
+  const uint8_t s = pkt[1], hi = s & 0xF0, ch = s & 0x0F;
+  uint8_t type, d1 = pkt[2], d2 = pkt[3];
+  bool critical = false;
+  switch (hi) {
+    case 0x80:                                                   // NoteOff
+      type = 1; critical = true;
+      break;
+    case 0x90:                                                   // NoteOn (vel 0 -> NoteOff)
+      if (d2 == 0) { type = 1; critical = true; }
+      else { type = 2; }
+      break;
+    case 0xB0:                                                   // CC (120/123 -> Panic)
+      if (d1 == 120 || d1 == 123) { type = 7; d1 = 0; d2 = 0; }
+      else { type = 3; }
+      break;
+    case 0xC0:                                                   // Program Change
+      type = 4; d2 = 0;
+      break;
+    case 0xE0:                                                   // Pitch Bend (d1=LSB, d2=MSB)
+      type = 5;
+      break;
+    default:                                                     // drop 0xA0 / 0xD0
+      return;
+  }
+  evtq_push((uint8_t)((type << 4) | ch), d1, d2, critical);
   g_takeoverLastUs = esp_timer_get_time();
 }
 
@@ -1049,8 +1105,8 @@ extern "C" void app_main() {
                (int)s.isPlaying(), t, g_offsetMs.load(), g_offsetTicks.load());
 #if defined(CONFIG_IDF_TARGET_ESP32S3)
       if (g_wireMode == WIRE_TAKEOVER || g_takeoverMode.load() != TK_AUTO)
-        ESP_LOGI(TAG, "  takeover=%s fifo=%u edges=%lu drop=%lu",
-                 (g_wireMode == WIRE_TAKEOVER) ? "ON" : "off", (unsigned)fifo_count(),
+        ESP_LOGI(TAG, "  takeover=%s evtq=%u edges=%lu drop=%lu",
+                 (g_wireMode == WIRE_TAKEOVER) ? "ON" : "off", (unsigned)evtq_count(),
                  (unsigned long)g_clkEdges, (unsigned long)g_dropped);
 #endif
     }

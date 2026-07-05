@@ -51,25 +51,29 @@
 
 // --- MIDI takeover (ESP32-S3 only): live console-clocked note stream ----------
 // In takeover mode the two port wires stop being the sync counter and become a
-// console-clocked serial link that streams raw MIDI voice bytes to the tracker,
-// which plays them live on its own voices (the sequencer is stopped). Same two
-// pins as the counter -- the two modes are mutually exclusive. Roles:
-//   PIN_MIDI_CLK  the CONSOLE drives (bridge reads) -- one edge per bit, master
+// console-clocked serial link that streams MIDI note events to the tracker, which
+// plays them live on its own voices (its sequencer stepped aside). Same two pins
+// as the counter -- mutually exclusive. Protocol = genmddj's MIDI.md 3 (the
+// console side is already built to it). Roles:
+//   PIN_MIDI_CLK  the CONSOLE drives (bridge reads) -- clock master, idle low
 //   PIN_MIDI_DAT  the BRIDGE drives open-drain (console reads) -- data, MSB-first
-// The bridge advances DAT to the next bit on each CLK FALLING edge, so the
-// console samples DAT >= ~5 us after driving CLK low (covers ESP32 ISR latency).
-// A byte is 8 clocks; a byte read in the status position that is 0x00 = FIFO
-// empty, else it is a MIDI status (bit 7 set) and the console clocks its data
-// bytes. Self-framing, no separate pending line.
+// The console pulses CLK low->high->low and samples DAT on the RISING edge; the
+// bridge changes DAT on the FALLING edge (so it's stable for the next rising
+// sample). After an idle gap (CLK low, no edges) the bridge presents a leading
+// FLAG bit: 1 => a fixed 3-byte event frame follows (status,d1,d2), 0 => queue
+// empty. status = type<<4 | channel (type: 1=NoteOff 2=NoteOn 3=CC 4=PgmChange
+// 5=PitchBend 7=Panic). The bridge normalises raw MIDI into these frames and
+// coalesces CC; the console parser is a bounded type switch. Each event = 25 bits.
 //
 // ELECTRICAL: reading CLK puts the console's (5 V) drive on an ESP32 input --
 // the same 5 V that already sits on the counter's open-drain pads when released,
 // so it's the same regime the C3 counter already survives on hardware. Verify on
 // the S3; add a series resistor / level shift on CLK if a real console misbehaves.
-#define PIN_MIDI_CLK   PIN_TH   // console -> bridge : clock (falling edge = next bit)
-#define PIN_MIDI_DAT   PIN_TR   // bridge  -> console : data, open-drain, MSB-first
+#define PIN_MIDI_CLK   PIN_TR   // console -> bridge : clock (TR=pin9); genmddj MIDI.md 3.1
+#define PIN_MIDI_DAT   PIN_TH   // bridge  -> console : data (TH=pin7), open-drain, MSB-first
 #define TAKEOVER_TIMEOUT_US  500000  // no channel-voice msg for this long -> back to counter (AUTO)
-#define MIDI_FIFO_SIZE       256     // raw-MIDI-byte ring awaiting the console (power of two)
+#define TAKEOVER_IDLE_US     1500    // CLK quiet this long -> idle gap: present a fresh flag bit
+#define MIDI_EVTQ_SIZE       32      // pending compact events awaiting the console (power of two)
 
 // --- Alignment offsets (by-ear latency compensation) ---
 // Fallback defaults used only when nothing is stored in NVS. Tune live over

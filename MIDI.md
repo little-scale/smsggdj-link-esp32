@@ -9,7 +9,8 @@ implemented yet; this is the contract each side builds against.
 Companion docs:
 - This repo — the **one firmware** that implements the pump + responder below.
 - SMSGGDJ tracker repo — its own `MIDI.md` (Z80 port I/O via `$DD`/`$3F`, engine reuse).
-- genmddj tracker repo — its own `MIDI.md`, to be written (68000 port I/O, its voices).
+- genmddj tracker repo — its own `MIDI.md` (**the canonical wire spec, §3**) + its
+  already-built console side (`midi_dispatch` etc.); only `midi_poll` (the shift-in) is left.
 - `WIRING.md` / `README.md` — the existing 2-bit sync counter this sits alongside.
 
 ## 1. The idea
@@ -29,60 +30,64 @@ Link / MIDI-clock **tempo sync on both consoles** — no new hardware.
 
 ## 2. The one-firmware principle
 
-**The bridge is a dumb, platform-agnostic MIDI→serial pump.** It has **zero**
-knowledge of how many voices a console has or how channels map to them:
+**The bridge is a platform-agnostic MIDI→compact-frame *normaliser*.** It knows nothing
+about how many voices a console has or how channels map to them — it just cleans MIDI up
+into a uniform stream both consoles read the same way:
 
 - Enumerate as a **USB-MIDI device** (needs the ESP32-**S3**; the C3 has no USB-OTG
   and stays Link-only).
-- Forward **standard MIDI channel-voice messages** (note on/off, program change, CC,
-  pitch bend — filter out clock/sysex/realtime it doesn't need) as their **raw
-  status + data bytes** into a ring FIFO. **No per-console remapping, no voice-count
-  assumptions.**
-- A **console-clocked serial responder** shifts the FIFO out on demand.
+- **Normalise** channel-voice messages (note on/off, PC, CC, pitch bend; filter out
+  clock/sysex/realtime) into fixed **compact `type<<4|channel` + 3-byte frames** (§3):
+  running status expanded, NoteOn-vel0 → NoteOff, all-notes-off CC → Panic, and **CC
+  coalesced** (latest value per controller, so a knob sweep can't flood the wire).
+- A **console-clocked responder** presents those frames bit-by-bit on demand (§3).
 
-**All platform knowledge lives on the console side.** SMSGGDJ and genmddj each map
-the MIDI channels they care about to their own voices and trigger notes in their own
-engines. That's what lets one firmware serve two consoles with different chips and
-different voice counts. (It mirrors how the existing **2-bit sync counter** is already
-console-agnostic — both consoles read the same counter the same way.)
+**The compact frames are console-agnostic**, so it's still one firmware: the `type` and
+channel are generic; only the *meaning* of a channel or a PC number is console-side. That
+normalisation is the deliberate division of labour — it keeps each console's parser a
+small bounded type-switch (genmddj's is already built that way) and moves MIDI's messiness
+(running status, CC floods, vel-0 note-offs) to the one place with cycles to spare.
+(It mirrors how the **2-bit sync counter** is already console-agnostic — both consoles read
+the same wire the same way.)
 
 ## 3. Shared wire protocol
 
-Keeping to **exactly two wires** (1 data bit, not a wider parallel transfer) is a
-deliberate hardware-minimisation choice. It's fast enough because takeover is
-**monophonic** and carries **no concurrent clock** — the wires do nothing but note data.
+**Canonical spec: `genmddj/MIDI.md` §3** — genmddj's console side is already built to it,
+and the S3 responder + both consoles implement it. This section is the summary; that doc
+is the source of truth for any detail.
 
-Same two port lines as the sync bridge, **repurposed by direction** in MIDI mode:
+Two wires + ground, **console is the clock master**, one-directional data:
 
-- **CLK** — the *console* drives it (console is clock master).
-- **DAT** — the *bridge* drives it open-drain; the console reads it.
+- **CLK** — the *console* drives it (idle **low**; pulses low→high→low, samples DAT on the
+  **rising** edge). On the DE-9 this is **TR (pin 9)**.
+- **DAT** — the *bridge* drives it open-drain and changes it on the **falling** edge
+  (stable before the next rising sample), **MSB-first**. This is **TH (pin 7)**.
 
-Console-clocked → **nothing is ever missed or duplicated**, whatever the console's
-polling timing. The console drains the FIFO each frame.
+Keeping to **exactly two wires** is deliberate hardware-minimisation; it's fast enough
+because takeover is monophonic-per-channel and carries no concurrent clock.
 
-**Byte stream = raw MIDI voice messages**, self-framing exactly like MIDI:
-- **status byte** has bit 7 **set** (`0x8n/0x9n/0xBn/0xCn/0xEn`), low nibble = **MIDI
-  channel 0–15**;
-- **data byte** has bit 7 **clear** (0–127);
-- **`0x00`** read *in the status position* = FIFO empty. The console's poll each frame is
-  just "clock one status byte; if `0x00`, nothing's waiting." **No separate pending line**
-  (simpler, and it removes a stale-DAT race the earlier draft had). A real `0x00` data byte
-  (note 0, velocity 0, CC/bend value 0) is never ambiguous — the console counts data bytes
-  by status;
-- **note-on with velocity 0 = note-off** (release);
-- **every message carries its status byte** — no MIDI running status (USB-MIDI packets
-  are always complete), so the console parser stays stateless.
+**Framing — flag bit + fixed 3-byte frame, idle-gap resync:**
+- After an **idle gap** (CLK quiet) the bridge presents a leading **flag bit** while idle.
+  Every console frame's burst is preceded by such a gap, so each burst **re-aligns from
+  scratch** — a glitch can't desync for more than one frame.
+- `flag = 1` → a fixed **3-byte event frame** follows; `flag = 0` → queue empty, stop.
 
-**Bit clocking (implemented on the bridge, S3):** the console generates CLK; the bridge
-drives DAT open-drain and advances to the next bit on each **CLK falling edge**,
-**MSB-first**, 8 edges per byte. The console samples DAT **≥ ~5 µs after** driving CLK low
-(covers the ESP32's GPIO-ISR latency). Idle DAT is released high. A byte read as a status
-whose top nibble is `8/9/B/C/E` tells the console to clock 2 more data bytes (1 for `C`).
+```
+per event slot (clocked, MSB first):
+   [1]  flag=1  -> [status=type<<4|chan] [data1] [data2]     ; 25 bits total
+   ...repeat back-to-back within the burst...
+   [0]  flag=0  -> queue empty
+```
+
+**`status = type<<4 | channel`** (channel = MIDI 0–15). `type`: 1 NoteOff · 2 NoteOn ·
+3 CC · 4 PgmChange · 5 PitchBend · 7 Panic. The bridge does the MIDI cleanup so the console
+parser is a bounded type-switch: **NoteOn vel 0 → NoteOff**, **CC 120/123 → Panic**, no
+running status, **CC coalesced** to the latest value per controller.
 
 **Key cross-platform point: the low nibble carries the MIDI channel (0–15), not a
 narrowed track index.** Each console filters/maps:
 - **SMSGGDJ:** channels 1–4 → T1 / T2 / T3 / N; drop 5–16.
-- **genmddj:** channels 1–N → its YM2612 FM (×6) + SN76489 PSG (×4) voices.
+- **genmddj:** channels 1–10 → F1–F6 (FM) / T1–T3 (square) / NO (noise).
 
 ## 4. Per-console layer (each tracker implements)
 
@@ -120,29 +125,35 @@ already do for `SYNC: OUT`.
 
 ## 6. Bridge firmware work (one, shared — this repo)
 
-- Extend USB-MIDI RX to capture note/PC/CC/pitch-bend on **all 16 channels** → ring
-  FIFO of **raw MIDI bytes** (no remap).
-- **Console-clocked TX responder** — CLK-edge ISR shifts the next DAT bit; hold DAT as
-  the pending flag while idle. Open-drain, same electrical contract as the counter.
-- **Mode arbitration** — note traffic → serial responder (drive DAT only, let the
-  console own CLK); Link / MIDI-clock → the existing 2-bit counter presenter (drive
-  both). Mutually exclusive on the 2 wires; identical for both consoles. Takeover never
-  needs both at once (it stops tracker playback), so the exclusivity costs nothing.
+- Capture note/PC/CC/pitch-bend on **all 16 channels** → **normalise** to compact
+  `type<<4|chan` + 3-byte frames (NoteOn-vel0 → NoteOff, CC 120/123 → Panic), **coalesce
+  CC**, into an event ring.
+- **Console-clocked responder** — a CLK falling-edge ISR presents the next DAT bit; a
+  short idle-gap watchdog presents the leading flag bit before each burst. Open-drain,
+  same electrical contract as the counter.
+- **Mode arbitration** — note traffic → responder (drive DAT only, console owns CLK);
+  Link / MIDI-clock → the existing 2-bit counter presenter (drive both). Mutually
+  exclusive on the 2 wires; identical for both consoles. Takeover never needs both at
+  once (it stops tracker playback), so the exclusivity costs nothing.
 - **S3-only** (USB-OTG). One S3 firmware image drives either console.
 
 ## 7. Milestones
 
-1. **Lock the shared protocol** — channel-preserving byte stream; each tracker's
-   `MIDI.md` masks the low nibble to its channel range.
-2. **One firmware** — RX→FIFO + console-clocked responder (platform-agnostic). **Built
-   (S3):** `forward_channel_voice` → `g_fifo` ring, the `clk_isr` shift-out responder, and
-   `wire_set_mode` arbitration (channel-voice → takeover, else the Link/MIDI-clock counter)
-   in `main/main.cpp`; serial `k <auto|on|off>` forces the mode; HUD reports fifo depth /
-   CLK edges / drops. **Bench-pending:** drive CLK from a second MCU + logic analyser to
-   confirm the byte stream, then check the CLK-input electrical (5 V on an ESP32 input).
-3. **SMSGGDJ MIDI takeover** — per the SMSGGDJ `MIDI.md`.
-4. **genmddj MIDI takeover** — mirror it with 68000 port I/O + the MD voice map; write
-   the genmddj `MIDI.md`.
+1. **Lock the shared protocol** — ✅ compact `type<<4|chan` flag-framed 3-byte frames with
+   idle-gap resync, defined canonically in `genmddj/MIDI.md` §3; each console maps the
+   channel to its own voices.
+2. **One firmware** — normalise→event-ring + console-clocked responder. **Built (S3):**
+   `forward_channel_voice` normalises + coalesces into `g_evtq`; `present_bit_locked` +
+   `clk_isr` shift the flag-framed frames; `takeover_idle_check` (off the presenter timer)
+   does the idle-gap resync; `wire_set_mode` arbitrates (channel-voice → takeover, else the
+   Link/MIDI-clock counter). Serial `k <auto|on|off>`; HUD reports evtq depth / CLK edges /
+   drops. **Bench-pending:** drive CLK from a second MCU + logic analyser to confirm the
+   frame stream, then check the CLK-input electrical (5 V on an ESP32 input).
+3. **SMSGGDJ MIDI takeover** — per the SMSGGDJ `MIDI.md` (to be written).
+4. **genmddj MIDI takeover** — its console side is **already built** (`midi_dispatch` +
+   note/CC/PC/bend/panic, takeover `engine_tick` branch, mode entry/exit; `genmddj/MIDI.md`).
+   The remaining piece is `midi_poll` — the 2-wire shift-in that clocks these frames in and
+   feeds `midi_dispatch`.
 5. **Hardware bring-up** on both consoles + the S3.
 
 ## 8. Settled decisions (2026-07-05)
