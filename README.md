@@ -289,8 +289,12 @@ same `.bin` to a GitHub Release for the `esptool` path.
 
 ## License
 
-GPL v2-or-later — this firmware links [Ableton
-Link](https://github.com/Ableton/link), which is GPL v2-or-later. You may share
-the binary freely, but distributing it carries the GPL obligation to make the
-corresponding source available; keeping this repository public and linked from
-the flasher/release satisfies that.
+**GPL-2.0-or-later** — full text in [`LICENSE`](LICENSE). The ESP32 firmware links
+[Ableton Link](https://github.com/Ableton/link), which is GPL-2.0-or-later, so the
+firmware and its binary are too. You may share the binary freely, but distributing
+it carries the GPL obligation to make the corresponding source available; keeping
+this repository public and linked from the flasher/release satisfies that.
+
+The **Teensy subproject** ([`teensy/`](teensy/)) does *not* link Ableton Link, so it
+isn't independently obligated to the GPL — but it's distributed under the **same
+GPL-2.0-or-later** as the rest of this repository, for simplicity and consistency.

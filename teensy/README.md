@@ -45,30 +45,60 @@ teensy/smsggdj_bridge_teensy/
 The board appears to your DAW as a USB-MIDI device named *Teensy MIDI*; send it clock
 (Start/Stop/Continue + 0xF8) and/or notes.
 
-## Wiring — ⚠️ Teensy 4.x is NOT 5 V tolerant
+## Wiring — ⚠️ a logic-level shifter is REQUIRED
 
-This is the one real difference from the ESP32. The console's controller lines idle at
-**5 V** (internal pull-ups), and in takeover the console **drives CLK to 5 V**. A Teensy 4.x
-pin (Vmax ≈ 3.6 V) exposed to 5 V **can be damaged** — the ESP32 marginally survives this,
-the Teensy will not.
+**Do not wire a Teensy 4.x directly to the controller port.** This is the one real
+difference from the ESP32, and it can destroy the board if you skip it:
 
-**Put a level shifter on both lines.** A **BSS138 bidirectional level shifter** (Adafruit
-#757 / SparkFun BOB-12009, or any BSS138 4-channel board) is the drop-in: it's open-drain
-on both sides, so it preserves the exact open-drain semantics the firmware assumes (release
-= pulled to the port's 5 V; drive = low) while clamping the Teensy side to 3.3 V. Wire the
-Teensy 3.3 V to the shifter's LV rail and the console's 5 V (port pin 5 — used *only* as the
-shifter's HV reference, not to power the Teensy) to HV.
+- Teensy 4.x pins run at **3.3 V and are *not* 5 V tolerant** (absolute max ≈ 3.6 V).
+- The console's controller lines **idle at 5 V** (internal pull-ups), and in takeover
+  mode the console actively **drives CLK to 5 V**.
+- So a bare Teensy pin on either line sees 5 V and **can be damaged**. (The ESP32
+  marginally tolerates this on the same pads; the Teensy does not — don't copy the
+  ESP32 wiring.)
 
-| Signal | Teensy pin | Shifter | DE-9 port 2 | Direction |
+### Use a BSS138 bidirectional level shifter
+
+Get a **BSS138-based bidirectional level shifter** — e.g. Adafruit #757 or SparkFun
+BOB-12009 (4 channels; you use 2). It's the correct part here because each channel is
+**open-drain / passive-pull-up on both sides**, which is *exactly* the electrical model
+the firmware and the console already use: a side either pulls the line **low** or
+**releases** it (the pull-up brings it high). So it drops in without changing any of the
+counter/takeover logic — it just isolates the Teensy's 3.3 V world from the port's 5 V.
+
+**A resistor divider is NOT a substitute** — the CLK line is bidirectional-in-effect and
+open-drain, and a divider can't pull up or pass an open-drain low cleanly. Use the BSS138
+board.
+
+Two rails set the shift ratio — get these right first:
+
+- **LV = Teensy 3.3 V** → the board's `LV` (low-voltage reference).
+- **HV = console 5 V** → the board's `HV`. Take 5 V from **DE-9 port-2 pin 5**, but use it
+  **only** as the shifter's HV reference — **never** to power the Teensy.
+- **GND** common to all three (Teensy, shifter, console).
+
+Then one signal per channel:
+
+```
+   TEENSY (3.3 V)          BSS138 shifter            SEGA DE-9 port 2 (5 V)
+   ─────────────           ───────────────           ──────────────────────
+   3.3 V ───────────────►  LV        HV  ◄─────────── pin 5  (+5 V, HV ref only)
+   GND ─────────────────►  GND      GND  ◄─────────── pin 8  (GND)
+   PIN_TR (pin 2) ◄─────►  A1        B1  ◄─────────►  pin 9  (TR / bit0 / CLK)
+   PIN_TH (pin 3) ◄─────►  A2        B2  ◄─────────►  pin 7  (TH / bit1 / DAT)
+```
+
+| Signal | Teensy pin | Shifter ch (LV↔HV) | DE-9 port-2 pin | Direction |
 |---|---|---|---|---|
-| **TR / bit0 / CLK** | `PIN_TR` (D2) | ch A | pin 9 | counter: out · takeover: **in** |
-| **TH / bit1 / DAT** | `PIN_TH` (D3) | ch B | pin 7 | out (open-drain) |
-| **GND** | any GND | — | pin 8 | shared ground |
+| **TR / bit0 / CLK** | `PIN_TR` = 2 | A1 ↔ B1 | 9 | counter: Teensy→port · takeover: **port→Teensy** |
+| **TH / bit1 / DAT** | `PIN_TH` = 3 | A2 ↔ B2 | 7 | Teensy→port (open-drain) |
+| **GND** | any GND | GND | 8 | shared ground |
+| — | 3.3 V → LV | HV ← 5 V (pin 5) | 5 (ref only) | rails |
 
-Power the Teensy from **its own USB** (the DAW cable). Share **only GND** with the console;
-do **not** tap port pin 5 to power the board. Pins are set in `config.h` — move `PIN_TR`/
-`PIN_TH` there if you prefer a different pair (keep them adjacent, and both are fine on
-Teensy 4.1's plain digital pins).
+Power the Teensy from **its own USB** (the DAW cable). Share **only GND** (and the 5 V HV
+*reference*) with the console — do **not** run the board off port pin 5. Pins are set in
+[`config.h`](smsggdj_bridge_teensy/config.h); move `PIN_TR`/`PIN_TH` there if you prefer a
+different pair (keep them adjacent — any two plain digital pins on the Teensy 4.1 work).
 
 ## Serial console
 

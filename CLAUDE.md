@@ -147,9 +147,11 @@ section of `main/main.cpp`:
 (`dist/smsggdj-bridge-esp32c3.bin`), copies it to `docs/firmware/`, and stamps
 `docs/manifest.json`. The web flasher lives in `docs/` (esp-web-tools, served via
 GitHub Pages from `/docs`); the merged `.bin` under `docs/firmware/` is a
-deliberate `.gitignore` exception so Pages can serve it. **License:** Ableton
-Link is GPL v2-or-later, so the binary is too — keep the repo public and linked
-from any release to satisfy the source-offer obligation.
+deliberate `.gitignore` exception so Pages can serve it. **License:** GPL-2.0-or-later
+(full text in `LICENSE`) — Ableton Link is GPL v2-or-later, so the firmware and its
+binary are too; keep the repo public and linked from any release to satisfy the
+source-offer obligation. The `teensy/` port doesn't link Link but ships under the
+same license for consistency.
 
 ## Clock sources (C3 = Link; S3 = Link + USB-MIDI)
 
