@@ -112,6 +112,21 @@ console with **`c link`**, **`c midi`**, or **`c auto`** (`s` saves the choice a
 the power-on default). On the S3 the serial console rides the **same USB-C cable**
 as the MIDI port (a composite CDC device), so one connection gives you both.
 
+> ⚠️ **Send MIDI Clock *or* notes to the S3 — not both at once.** The bridge serves
+> the two port wires in one of two mutually-exclusive roles, auto-selected by
+> whether channel-voice MIDI (notes/CC) is arriving:
+> - **Clock sync** (console `SYNC: IN24`): the S3 presents the **24-PPQN counter**.
+>   Send **MIDI Clock only** — no notes/CC on that port.
+> - **Note takeover** (console `SYNC: MIDI`): the S3 streams **note events** on the
+>   wire and the tracker plays them on its own voices.
+>
+> If notes/CC arrive while you're trying to clock-sync, they **auto-engage takeover**
+> and hijack the wire from the counter — the tracker (IN24) then reads note-bits as
+> counter ticks, giving erratic/irregular movement. Fixes: mute the note track so
+> only clock flows, or force the role on the console — **`k off`** (never takeover,
+> always counter) or **`k on`** (always takeover). `k auto` (default) picks by
+> traffic.
+
 > Latency note: in MIDI mode the **tick** offset (`t`) works as usual; the **ms**
 > offset (`m`) is Link-only (MIDI clock is reactive, so it can't be nudged
 > *earlier* in time). USB-MIDI latency is sub-millisecond, so it rarely needs

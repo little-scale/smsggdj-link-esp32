@@ -873,8 +873,10 @@ static void wire_set_mode(WireMode m) {
     gpio_config_t in = {};
     in.pin_bit_mask = 1ULL << PIN_MIDI_CLK;
     in.mode = GPIO_MODE_INPUT;
-    in.pull_up_en = GPIO_PULLUP_DISABLE;
-    in.pull_down_en = GPIO_PULLDOWN_ENABLE;    // idle-low CLK (console drives it), defined when unplugged
+    in.pull_up_en = GPIO_PULLUP_ENABLE;        // open-drain CLK: the console drives LOW and releases; supply
+                                               //   the HIGH here (~3.3V via the internal pull-up) so no external
+                                               //   pull-up is needed. Only edges matter (below), not the level.
+    in.pull_down_en = GPIO_PULLDOWN_DISABLE;   // a pull-DOWN would fight the open-drain high -> off
     in.intr_type = GPIO_INTR_NEGEDGE;          // falling edge = the console has sampled; present the next bit
     ESP_ERROR_CHECK(gpio_config(&in));
     ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_MIDI_CLK, clk_isr, nullptr));

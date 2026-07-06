@@ -92,6 +92,13 @@ Drive directly to an SMS / Game Gear — genmddj ↔ SMSGGDJ.
 
 > ⚠ **Not yet hardware-verified.** The firmware + console both build to this; the wire
 > timing and the CLK-input electrical below still need a bench + a real console.
+> (The *counter/clock-sync* direction — `SYNC: IN24` — **is** hardware-verified, incl.
+> from a DAW's USB-MIDI clock, 2026-07-06.)
+
+> ⚠ **Send clock OR notes to the S3, never both at once** — takeover (notes) and the
+> counter (clock) are mutually exclusive on the two wires, auto-arbitrated by traffic.
+> Notes arriving during clock-sync hijack the wire and garble `IN24`. See README →
+> *Clock source* for the full rule and the `k off`/`k on`/`k auto` overrides.
 
 MIDI takeover (`SYNC=MIDI` on the console; `k on`/auto on the bridge) reuses the **same
 three wires — no re-cabling**. Only the pin *directions* change, and the firmware
@@ -103,21 +110,29 @@ three wires — no re-cabling**. Only the pin *directions* change, and the firmw
 | **DAT** | TH (pin 7) | bridge → console (counter bit 1) | **bridge → console** (data, MSB-first) |
 | GND | pin 8 | shared | shared |
 
-- **DAT (TH, pin 7)** — electrically unchanged: the bridge drives it **open-drain**, the
-  console reads it. The **10 kΩ pull-up on pin 7** advised above applies here too (it's the
-  high level for the data line).
-- **CLK (TR, pin 9)** — the **new** direction: the *console* now drives it and the **ESP32
-  reads it as an input**. genmddj drives TR push-pull to ~**5 V**, but the ESP32 pin is
-  3.3 V. ⚠ **Mitigate the 5 V on the input:**
-  - **Simple + safe (recommended):** a resistor divider on the CLK line into the ESP32 —
-    e.g. **1.8 kΩ in series + 3.3 kΩ to GND** (≈ 3.2 V from 5 V). Two passives.
-  - **Zero-extra-parts alternative:** have genmddj drive CLK **open-drain** (toggle TR's
-    *direction* — output-low to assert, input/high-Z to release) with a **3.3 kΩ pull-up to
-    the XIAO 3V3 pad**; the line then never exceeds 3.3 V. Costs a small genmddj bit-bang
-    change (a direction toggle per edge in `midi_clock_bit`) — see `genmddj/MIDI.md §3`.
+**Both lines are open-drain — no divider, no level shifter, and (with current firmware) no
+external pull-ups.** As of the open-drain CLK change in `genmddj/MIDI.md §3`, MIDI mode is the
+*same electrical regime* as the counter lines: the ESP32 never sees a hard-driven 5 V, so **wire
+it exactly like the bare Link cable — three wires, nothing else.**
 
-Everything else (GND, don't-connect-+5 V, the S3 pad map D3=TR/D4=TH) is identical to the
-counter tables above.
+- **DAT (TH, pin 7)** — the bridge drives it **open-drain**, the console reads it. Its high comes
+  from the console's internal pull-up (same as counter-mode TH). No external part needed.
+- **CLK (TR, pin 9)** — the *console* now drives it and the **ESP32 reads it as an input**.
+  genmddj drives TR **open-drain** (`midi_clock_bit` toggles TR's *direction*: output-low to
+  assert, input/high-Z to release), holding the data latch at 0 so it **never sources 5 V**. The
+  ESP32 supplies the high with its **internal pull-up** on the CLK pin (`wire_set_mode` sets
+  `GPIO_PULLUP_ENABLE`), so no external pull-up is needed either. The line never carries a strong
+  5 V. **No divider.**
+
+So MIDI mode wires up **bare, exactly like the counter cable** (GND, don't-connect-+5 V, S3 pad
+map D3=TR/D4=TH). Only add a 10 kΩ pull-up to 3V3 on a line if it reads flaky on your console (the
+same MD-internal-pull-up-strength caveat as the counter ⚠ note); a firmer ~1–2 kΩ pull-up on CLK
+would also cap it cleanly at 3.3 V if you want to take the ESP32 clamp out of the picture.
+
+> Historical note: an earlier draft required a **1.8 kΩ + 3.3 kΩ divider** on CLK because genmddj
+> drove TR push-pull at 5 V, and the firmware kept a **pull-down** on the CLK input. The open-drain
+> CLK change + the CLK-input **pull-up** removed both. On a genmddj build from before the open-drain
+> change (push-pull TR), use the divider and revert the input to a pull-down.
 
 ## Bench-testing the bridge (no console needed)
 

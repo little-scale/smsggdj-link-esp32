@@ -65,10 +65,13 @@
 // 5=PitchBend 7=Panic). The bridge normalises raw MIDI into these frames and
 // coalesces CC; the console parser is a bounded type switch. Each event = 25 bits.
 //
-// ELECTRICAL: reading CLK puts the console's (5 V) drive on an ESP32 input --
-// the same 5 V that already sits on the counter's open-drain pads when released,
-// so it's the same regime the C3 counter already survives on hardware. Verify on
-// the S3; add a series resistor / level shift on CLK if a real console misbehaves.
+// ELECTRICAL: genmddj drives CLK OPEN-DRAIN (it toggles TR's direction, never its
+// 5 V level -- see genmddj/MIDI.md 3): it pulls LOW and releases. The ESP32 supplies
+// the HIGH via its internal pull-up (wire_set_mode sets GPIO_PULLUP_ENABLE on this
+// pin), so CLK stays ~3.3 V and needs NO external part -- wire it bare, same as the
+// counter lines. Only edges matter here, not the level. (Pre-open-drain genmddj drove
+// TR push-pull at 5 V and this input kept a pull-DOWN; that combo needed a 1.8k+3.3k
+// divider -- only relevant on an old console build.)
 #define PIN_MIDI_CLK   PIN_TR   // console -> bridge : clock (TR=pin9); genmddj MIDI.md 3.1
 #define PIN_MIDI_DAT   PIN_TH   // bridge  -> console : data (TH=pin7), open-drain, MSB-first
 #define TAKEOVER_TIMEOUT_US  500000  // no channel-voice msg for this long -> back to counter (AUTO)
