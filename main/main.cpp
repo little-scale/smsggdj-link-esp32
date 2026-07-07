@@ -820,8 +820,14 @@ static void IRAM_ATTR takeover_idle_check() {
   portENTER_CRITICAL_ISR(&g_fifoMux);
   if (!g_idleArmed && (now - g_lastClkUs) > TAKEOVER_IDLE_US) {
     g_idleArmed = true;
-    g_srBits = 0;              // drop any partial frame; reload from the flag
-    present_bit_locked();
+    // Present a fresh flag ONLY if nothing is already loaded. srBits>0 means a
+    // frame was popped from the queue but not yet clocked out by the console
+    // (it missed the poll that loaded it). The old unconditional `g_srBits=0`
+    // reset discarded that frame, and since it was already popped the reload
+    // found an empty queue -> the isolated event was silently lost. Leaving it
+    // presented lets the console read it on its next poll. When idle with
+    // nothing loaded (srBits==0), reload so a freshly-queued note is presented.
+    if (g_srBits == 0) present_bit_locked();
   }
   portEXIT_CRITICAL_ISR(&g_fifoMux);
 }
