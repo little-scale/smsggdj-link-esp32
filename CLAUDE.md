@@ -199,16 +199,20 @@ sequencer stopped — the console becomes a live multi-part MIDI sound module.
 MIDI→compact-frame *normaliser*; the channel→voice meaning is console-side.
 Concept + full contract in **`MIDI.md`**; the canonical wire spec is
 **`~/Documents/genmddj/MIDI.md` §3** (genmddj's console side is already built to
-it). Status: **milestones 1–2 done** (protocol locked, S3 firmware built);
-**bench-pending** (drive CLK from a 2nd MCU + logic analyser; verify the 5 V
-CLK-input electrical). The consoles' `midi_poll` shift-in is not written yet.
+it). Status: **hardware-verified 2026-07-07** — the full loop runs on a real
+console (Mega Drive 2 in Master System mode + Everdrive, driving smsggdj: USB-MIDI
+ch 1–4 → the four PSG voices), bare 3-wire. Minor wire-timing polish remains
+(bit-settle tuning; auto-engage takeover so `k on` isn't needed). Note: the
+smsggdj console currently uses a **trigger model** — it ignores the NoteOff the
+bridge sends and lets the instrument's attack-hold-decay envelope play out.
 
 - **Wire roles flip** (`config.h`): `PIN_MIDI_CLK = PIN_TR` — the **console**
   drives it (clock master, idle low, samples DAT on the **rising** edge);
   `PIN_MIDI_DAT = PIN_TH` — the **bridge** drives it open-drain, changing it on
-  the **falling** edge, **MSB-first**. So in takeover the ESP32 *reads* TR (a
-  5 V input from a real console — same regime the counter pads already survive;
-  `WIRING.md` recommends a divider / open-drain CLK to be safe).
+  the **falling** edge, **MSB-first**. So in takeover the ESP32 *reads* TR. The
+  console drives TR **open-drain** and the ESP32 pulls the CLK input up internally,
+  so it's the same bare 3-wire regime as the counter — **no divider / level shifter**
+  (hardware-confirmed on a MD2; only add a pull-up if a line reads flaky).
 - **Frame** (`MIDI.md` §3): after an idle gap the bridge presents a leading
   **flag** bit — `1` → a fixed 3-byte event follows (`status,d1,d2`; 25 bits
   total), `0` → queue empty. `status = type<<4 | channel` (type: 1 NoteOff,

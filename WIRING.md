@@ -90,10 +90,17 @@ Drive directly to an SMS / Game Gear — genmddj ↔ SMSGGDJ.
 
 ## MIDI takeover mode (S3) — same wires, different directions
 
-> ⚠ **Not yet hardware-verified.** The firmware + console both build to this; the wire
-> timing and the CLK-input electrical below still need a bench + a real console.
-> (The *counter/clock-sync* direction — `SYNC: IN24` — **is** hardware-verified, incl.
-> from a DAW's USB-MIDI clock, 2026-07-06.)
+> ✅ **Hardware-verified 2026-07-07** — on a **Mega Drive 2 in Master System mode**
+> (+ Everdrive) driving smsggdj: USB-MIDI on ch 1–4 plays the four PSG voices live,
+> bare 3-wire (no divider), with `k on` on the bridge. The *counter/clock-sync*
+> direction (`SYNC: IN24`) was verified earlier (2026-07-06, incl. from a DAW's
+> USB-MIDI clock). **Minor wire-timing polish remains** — bit-settle tuning, and a
+> plan to auto-engage takeover so `k on` isn't needed.
+>
+> Bring-up fixed one real bug: the bridge's idle-gap resync (`takeover_idle_check`)
+> discarded a frame that had been popped from the queue but not yet clocked out,
+> silently losing **isolated** note-ons/offs (bursts masked it — "you had to play
+> overlapping notes to hear anything"). Fixed: only re-present when nothing is loaded.
 
 > ⚠ **Send clock OR notes to the S3, never both at once** — takeover (notes) and the
 > counter (clock) are mutually exclusive on the two wires, auto-arbitrated by traffic.

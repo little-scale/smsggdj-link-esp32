@@ -131,6 +131,12 @@ already do for `SYNC: OUT`.
 - **Console-clocked responder** — a CLK falling-edge ISR presents the next DAT bit; a
   short idle-gap watchdog presents the leading flag bit before each burst. Open-drain,
   same electrical contract as the counter.
+  - ⚠ The idle-gap watchdog must **only (re)present a fresh flag when nothing is loaded**
+    (`srBits == 0`). `load_frame_locked()` pops the event from the queue as it loads it,
+    so if the console missed the poll that loaded a frame, an unconditional resync
+    (`srBits = 0` then reload) would discard that frame and reload from an empty queue —
+    silently losing **isolated** note-ons/offs (bursts survive because the queue holds
+    backups). This was the 2026-07-07 "need overlapping notes to hear anything" bug.
 - **Mode arbitration** — note traffic → responder (drive DAT only, console owns CLK);
   Link / MIDI-clock → the existing 2-bit counter presenter (drive both). Mutually
   exclusive on the 2 wires; identical for both consoles. Takeover never needs both at
